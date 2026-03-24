@@ -1,0 +1,33 @@
+# Output directories
+outputs/
+data/derived/
+
+# R session files
+*.RData
+*.Rhistory
+.Rhistory
+.RData
+.Rproj.user/
+.Renviron
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*~
+*.swp
+*.bak
+
+# Rendered reports
+reports/*_files/
+reports/*.html
+reports/*.pdf
+!reports/*.qmd
+
+# Local planning / assistant files
+.claude/
+CLAUDE.md
+osam_ai_build_plan.md

@@ -1,0 +1,212 @@
+---
+title: "StreamCurves — Geomorphic Reference Curve Analysis"
+subtitle: "Interactive Dashboard"
+format:
+  html:
+    toc: true
+    toc-location: left
+    theme: cosmo
+    page-layout: full
+    self-contained: true
+    code-fold: true
+    code-summary: "Show code"
+params:
+  run_dir: "../outputs/run_latest"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(reactable)
+library(htmltools)
+
+# Find most recent run directory if run_latest doesn't exist
+run_dir <- params$run_dir
+if (!dir.exists(run_dir)) {
+  all_runs <- list.dirs("../outputs", recursive = FALSE, full.names = TRUE)
+  all_runs <- sort(all_runs, decreasing = TRUE)
+  if (length(all_runs) > 0) {
+    run_dir <- all_runs[1]
+  }
+}
+
+tables_dir <- file.path(run_dir, "tables")
+plots_dir  <- file.path(run_dir, "plots")
+
+# Helper to safely read CSV
+safe_read <- function(path) {
+  if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE)
+  else tibble::tibble()
+}
+```
+
+## Overview {.tabset}
+
+### Overview
+
+**Run Directory:** `r run_dir`
+
+```{r overview}
+manifest_path <- file.path(run_dir, "manifest", "run_manifest.json")
+if (file.exists(manifest_path)) {
+  manifest <- jsonlite::read_json(manifest_path)
+  cat("Run ID:", manifest$run_id, "\n")
+  cat("Timestamp:", manifest$timestamp, "\n")
+  cat("R Version:", manifest$r_version, "\n")
+}
+```
+
+### Data QA
+
+```{r data-qa}
+precheck <- safe_read(file.path(tables_dir, "metric_precheck.csv"))
+if (nrow(precheck) > 0) {
+  reactable::reactable(
+    precheck,
+    filterable = TRUE, searchable = TRUE, striped = TRUE,
+    defaultPageSize = 25,
+    columns = list(
+      precheck_status = colDef(
+        style = function(value) {
+          color <- switch(value, pass = "green", caution = "orange", fail = "red", "gray")
+          list(color = color, fontWeight = "bold")
+        }
+      )
+    )
+  )
+}
+```
+
+### Stratification
+
+```{r stratification}
+strat_results <- safe_read(file.path(tables_dir, "stratification_screening.csv"))
+if (nrow(strat_results) > 0) {
+  reactable::reactable(
+    strat_results,
+    filterable = TRUE, searchable = TRUE, striped = TRUE,
+    defaultPageSize = 25,
+    columns = list(
+      p_value = colDef(format = colFormat(digits = 4)),
+      classification = colDef(
+        style = function(value) {
+          color <- if (grepl("selected", value)) "green" else if (grepl("rejected", value)) "red" else "gray"
+          list(color = color, fontWeight = "bold")
+        }
+      )
+    )
+  )
+}
+```
+
+#### Stratification Decisions
+
+```{r strat-decisions}
+strat_dec <- safe_read(file.path(tables_dir, "stratification_decisions.csv"))
+if (nrow(strat_dec) > 0) {
+  reactable::reactable(strat_dec, filterable = TRUE, striped = TRUE)
+}
+```
+
+### Model Selection
+
+```{r model-selection}
+model_sel <- safe_read(file.path(tables_dir, "model_selections.csv"))
+if (nrow(model_sel) > 0) {
+  reactable::reactable(
+    model_sel,
+    filterable = TRUE, searchable = TRUE, striped = TRUE,
+    columns = list(
+      adj_r2 = colDef(format = colFormat(digits = 3)),
+      bic = colDef(format = colFormat(digits = 1)),
+      needs_review = colDef(
+        style = function(value) {
+          if (isTRUE(value)) list(color = "orange", fontWeight = "bold")
+          else list()
+        }
+      )
+    )
+  )
+}
+```
+
+### Diagnostics
+
+```{r diagnostics}
+diag_summary <- safe_read(file.path(tables_dir, "diagnostic_summary.csv"))
+if (nrow(diag_summary) > 0) {
+  reactable::reactable(
+    diag_summary,
+    filterable = TRUE, searchable = TRUE, striped = TRUE,
+    columns = list(
+      overall_status = colDef(
+        style = function(value) {
+          color <- switch(value, pass = "green", caution = "orange", fail = "red", "gray")
+          list(color = color, fontWeight = "bold")
+        }
+      )
+    )
+  )
+}
+```
+
+### Reference Curves
+
+```{r reference-curves}
+ref_curves <- safe_read(file.path(tables_dir, "reference_curves.csv"))
+if (nrow(ref_curves) > 0) {
+  reactable::reactable(
+    ref_curves,
+    filterable = TRUE, searchable = TRUE, striped = TRUE,
+    columns = list(
+      q25 = colDef(format = colFormat(digits = 1)),
+      q75 = colDef(format = colFormat(digits = 1))
+    )
+  )
+}
+```
+
+### Cross-Metric
+
+```{r cross-metric}
+redundancy <- safe_read(file.path(tables_dir, "metric_redundancy_results.csv"))
+if (nrow(redundancy) > 0) {
+  reactable::reactable(
+    redundancy |> dplyr::filter(abs_pearson > 0.5),
+    filterable = TRUE, searchable = TRUE, striped = TRUE,
+    columns = list(
+      pearson_r = colDef(format = colFormat(digits = 3)),
+      redundant_flag = colDef(
+        style = function(value) {
+          if (isTRUE(value)) list(color = "red", fontWeight = "bold") else list()
+        }
+      )
+    )
+  )
+}
+```
+
+### Regional Curves
+
+```{r regional-curves}
+regional <- safe_read(file.path(tables_dir, "regional_curves_results.csv"))
+if (nrow(regional) > 0) {
+  reactable::reactable(
+    regional,
+    filterable = TRUE, searchable = TRUE, striped = TRUE,
+    columns = list(
+      r_squared = colDef(format = colFormat(digits = 3)),
+      coefficient_a = colDef(format = colFormat(digits = 4)),
+      exponent_b = colDef(format = colFormat(digits = 3))
+    )
+  )
+}
+```
+
+### Run Info
+
+```{r run-info}
+log_df <- safe_read(file.path(run_dir, "logs", "pipeline_log.csv"))
+if (nrow(log_df) > 0) {
+  reactable::reactable(log_df, striped = TRUE)
+}
+```

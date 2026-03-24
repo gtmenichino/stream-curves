@@ -26,8 +26,7 @@ deploy_paths <- c(
   "app.R",
   "app",
   "R",
-  "config",
-  "data/raw/data_example.csv"
+  "config"
 )
 
 missing_paths <- deploy_paths[!file.exists(deploy_paths)]

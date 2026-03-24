@@ -1,28 +1,37 @@
-## ── StreamCurves Geomorphic Reference Curve Analysis ──────────────────────
-## run_all.R — Top-level entry point
+## StreamCurves Geomorphic Reference Curve Analysis
+## run_all.R - Top-level entry point
 ##
 ## Usage:
-##   source("run_all.R")                        # Run all metrics
-##   source("R/run_pipeline.R")                  # Load pipeline, then:
-##   run_pipeline(metrics = "perRiffle")         # Run single metric
+##   source("run_all.R")  # Run all metrics after setting csv_path below
+##   source("R/run_pipeline.R")
+##   run_pipeline(csv_path = "path/to/data.csv", metrics = "perRiffle")
 
 ## Source the pipeline orchestrator
 source("R/run_pipeline.R")
 
-## ── User-configurable settings ──────────────────────────────────────────────
-n_cores <- 1L  # Sequential execution (parallel overhead not worth it for this dataset size)
+## User-configurable settings
+csv_path <- NULL  # Set this to your input CSV before running.
+n_cores <- 1L  # Sequential execution (parallel overhead not worth it for dataset size)
+
+if (is.null(csv_path) || !nzchar(csv_path)) {
+  stop(
+    "Set `csv_path` in run_all.R to your input CSV before running the pipeline.",
+    call. = FALSE
+  )
+}
 
 ## Execute full pipeline
 run_dir <- run_pipeline(
   config_dir = "config",
-  data_dir   = "data",
+  data_dir = "data",
+  csv_path = csv_path,
   output_dir = "outputs",
-  metrics    = NULL,
-  seed       = 42,
-  n_cores    = n_cores
+  metrics = NULL,
+  seed = 42,
+  n_cores = n_cores
 )
 
-## ── Render reports ──────────────────────────────────────────────────────────
+## Render reports
 if (!is.null(run_dir) &&
     requireNamespace("quarto", quietly = TRUE) &&
     !is.null(quarto::quarto_path())) {
@@ -35,9 +44,9 @@ if (!is.null(run_dir) &&
 
   report_specs <- list(
     list(file = "reports/dashboard.qmd", label = "Dashboard (HTML)", out_name = "dashboard.html"),
-    list(file = "reports/summary.qmd",   label = "Summary (PDF)",    out_name = "summary.pdf"),
-    list(file = "reports/poster.qmd",    label = "Poster 24x36 (PDF)", out_name = "poster.pdf"),
-    list(file = "reports/appendix.qmd",  label = "Appendix (PDF)",   out_name = "appendix.pdf")
+    list(file = "reports/summary.qmd", label = "Summary (PDF)", out_name = "summary.pdf"),
+    list(file = "reports/poster.qmd", label = "Poster 24x36 (PDF)", out_name = "poster.pdf"),
+    list(file = "reports/appendix.qmd", label = "Appendix (PDF)", out_name = "appendix.pdf")
   )
 
   ## Filter to existing templates
@@ -101,8 +110,8 @@ if (!is.null(run_dir) &&
     }
   }
 } else if (is.null(run_dir)) {
-  cli::cli_alert_warning("Pipeline did not complete — skipping report rendering")
+  cli::cli_alert_warning("Pipeline did not complete - skipping report rendering")
 } else {
-  cli::cli_alert_warning("Quarto not available — skipping report rendering")
+  cli::cli_alert_warning("Quarto not available - skipping report rendering")
   cli::cli_alert_info("  Install: https://quarto.org/docs/get-started/")
 }

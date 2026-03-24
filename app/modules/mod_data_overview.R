@@ -16,8 +16,8 @@ data_setup_intro_card <- function() {
     card_body(
       p("This application guides you through a structured, 4-phase evaluation
          of stratification variables and reference curve development for geomorphic
-         metrics. It ships with a synthetic example dataset for exploring the
-         workflow -- upload your own data for actual analysis."),
+         metrics. Upload your own dataset to begin the workflow and run
+         the analysis."),
       p("For each metric, you will explore candidate stratifications, verify
          consistency across metrics, confirm your selection, then build and
          finalize reference curves scored on a 0-1 scale.")
@@ -128,9 +128,6 @@ mod_data_overview_ui <- function(id) {
         placeholder = "No file selected"
       ),
       uiOutput(ns("upload_status")),
-      actionButton(ns("load_demo_data"), "Load Demo Data",
-                   class = "btn btn-outline-secondary w-100 mt-2",
-                   icon = icon("flask")),
       uiOutput(ns("reset_analysis_button")),
       hr(),
 
@@ -200,9 +197,6 @@ sanitize_removed_stratification_state <- function(rv, removed_key) {
 
   if (removed_key %in% names(rv$data %||% list())) {
     rv$data[[removed_key]] <- NULL
-  }
-  if (removed_key %in% names(rv$builtin_data %||% list())) {
-    rv$builtin_data[[removed_key]] <- NULL
   }
 
   rv$strat_config[[removed_key]] <- NULL
@@ -304,26 +298,6 @@ mod_data_overview_server <- function(id, rv) {
 
 
     ## ── Load Data click ─────────────────────────────────────────────────
-    observeEvent(input$load_demo_data, {
-      upload_error(NULL)
-      reset_all_analysis(rv)
-      rv$data             <- rv$builtin_data
-      rv$qa_log           <- rv$builtin_qa_log
-      rv$precheck_df      <- rv$builtin_precheck_df
-      rv$data_source      <- "builtin"
-      rv$upload_filename  <- NULL
-      rv$data_fingerprint <- tools::md5sum(
-        file.path(project_root, "data", "raw", "data_example.csv")
-      )
-      session$sendCustomMessage("clearFileInput", list(id = ns("upload_file")))
-      rv$app_data_loaded <- TRUE
-      session$onFlushed(function() {
-        config_init_trigger(isolate(config_init_trigger()) + 1L)
-      }, once = TRUE)
-      showNotification("Built-in example dataset loaded.",
-                       type = "message", duration = 5)
-    }, ignoreInit = TRUE)
-
     output$reset_analysis_button <- renderUI({
       actionButton(
         ns("reset_analysis"),
@@ -395,9 +369,7 @@ mod_data_overview_server <- function(id, rv) {
         class = "border-info",
         card_header("Get Started"),
         card_body(
-          p("Upload a CSV or XLSX file to load your dataset and open the setup panels automatically."),
-          p("Use ", tags$strong("Load Demo Data"),
-            " if you want to explore the workflow with the built-in example dataset.")
+          p("Upload a CSV or XLSX file to load your dataset and open the setup panels automatically.")
         )
       )
 
@@ -689,6 +661,18 @@ mod_data_overview_server <- function(id, rv) {
       }
 
       session_data <- readRDS(load_path)
+
+      if (identical(session_data$data_source %||% NULL, "builtin")) {
+        showNotification(
+          paste0(
+            "Session '", session_name,
+            "' uses the removed built-in example dataset and cannot be restored. Upload a dataset first."
+          ),
+          type = "error",
+          duration = 8
+        )
+        return()
+      }
 
       ## Verify data fingerprint
       current_fp <- rv$data_fingerprint

@@ -46,6 +46,8 @@ install.packages(c("gt", "quarto", "reactable"))
 shiny::runApp("app")
 ```
 
+This is the recommended local-development entrypoint. The repo-root `app.R` is reserved for Posit Connect Cloud deployment.
+
 The app ships with a built-in example dataset and also accepts user uploads in CSV or XLSX format.
 
 Current top-level app areas:
@@ -71,17 +73,44 @@ run_pipeline(metrics = "perRiffle")
 
 Outputs are written to timestamped folders under `outputs/`, which is intentionally ignored from version control.
 
+## Deploy to Posit Connect Cloud
+
+Connect Cloud requires a committed `manifest.json` in the same directory as the deployment primary file. In this repository, the deployment primary file is the repo-root `app.R`.
+
+1. Install the app dependencies from the Requirements section.
+2. Install `rsconnect` if it is not already available:
+
+```r
+install.packages("rsconnect")
+```
+
+3. Regenerate the deployment manifest from the repo root:
+
+```r
+source("scripts/write_connect_manifest.R")
+```
+
+4. Commit and push the updated `manifest.json`.
+5. In Posit Connect Cloud, publish or republish this repository using the repo-root `app.R` as the primary file.
+
+Notes:
+
+- The local app entrypoint remains `app/app.R`, typically launched with `shiny::runApp("app")`.
+- Session save/load is disabled in the cloud deployment because Connect Cloud does not provide durable app-local file persistence for that feature.
+
 ## Repository Layout
 
 ```text
 stream-curves/
 |- app/          Shiny app entrypoints, modules, helpers, and static assets
+|- app.R         Repo-root deployment entrypoint for Connect Cloud
 |- R/            Analysis pipeline functions
 |- config/       YAML registries for metrics, predictors, stratifications, and outputs
 |- data/
 |  |- raw/       Source data files, including the example dataset
 |  `- derived/   Derived datasets created by the pipeline (ignored)
 |- reports/      Quarto report templates
+|- scripts/      Project utility scripts, including manifest generation
 |- docs/         Reference material retained with the project
 |- archive/      Historical prototypes and legacy reference files
 |- outputs/      Run outputs and saved sessions (ignored)
@@ -121,4 +150,3 @@ The `reports/` directory contains Quarto templates for dashboard, summary, poste
 - Generated outputs are ignored.
 - Local R session files are ignored.
 - Local assistant and planning artifacts are ignored.
-

@@ -51,6 +51,46 @@ upload_format_tooltip_content <- function() {
   )
 }
 
+session_management_ui <- function(ns) {
+  if (isTRUE(connect_cloud_runtime)) {
+    return(
+      div(
+        class = "alert alert-info py-2 px-2 mt-3 mb-0",
+        icon("cloud"),
+        " Session save/load is unavailable in this Connect Cloud deployment."
+      )
+    )
+  }
+
+  tagList(
+    tags$strong("Save Current Session"),
+    div(
+      class = "mt-2",
+      textInput(ns("session_name"), NULL, placeholder = "Session name...",
+                width = "100%"),
+      actionButton(ns("save_session"), "Save",
+                   class = "btn btn-outline-primary btn-sm w-100 mt-1",
+                   icon = icon("save"))
+    ),
+    tags$hr(class = "my-2"),
+    tags$strong("Load Previous Session"),
+    div(
+      class = "mt-2",
+      selectInput(ns("load_session_select"), NULL,
+                  choices = c("(none)"), width = "100%"),
+      div(
+        class = "d-flex gap-2 mt-1",
+        actionButton(ns("refresh_sessions"), "",
+                     class = "btn btn-outline-secondary btn-sm",
+                     icon = icon("refresh")),
+        actionButton(ns("load_session_btn"), "Load",
+                     class = "btn btn-outline-success btn-sm flex-grow-1",
+                     icon = icon("upload"))
+      )
+    )
+  )
+}
+
 mod_data_overview_ui <- function(id) {
   ns <- NS(id)
 
@@ -95,31 +135,7 @@ mod_data_overview_ui <- function(id) {
       hr(),
 
       ## ── Session Management ──────────────────────────────────────────────
-      tags$strong("Save Current Session"),
-      div(
-        class = "mt-2",
-        textInput(ns("session_name"), NULL, placeholder = "Session name...",
-                  width = "100%"),
-        actionButton(ns("save_session"), "Save",
-                     class = "btn btn-outline-primary btn-sm w-100 mt-1",
-                     icon = icon("save"))
-      ),
-      tags$hr(class = "my-2"),
-      tags$strong("Load Previous Session"),
-      div(
-        class = "mt-2",
-        selectInput(ns("load_session_select"), NULL,
-                    choices = c("(none)"), width = "100%"),
-        div(
-          class = "d-flex gap-2 mt-1",
-          actionButton(ns("refresh_sessions"), "",
-                       class = "btn btn-outline-secondary btn-sm",
-                       icon = icon("refresh")),
-          actionButton(ns("load_session_btn"), "Load",
-                       class = "btn btn-outline-success btn-sm flex-grow-1",
-                       icon = icon("upload"))
-        )
-      )
+      session_management_ui(ns)
     ),
 
     ## ── Main Content ──────────────────────────────────────────────────────
@@ -275,6 +291,7 @@ sanitize_removed_stratification_state <- function(rv, removed_key) {
 mod_data_overview_server <- function(id, rv) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+    session_persistence_enabled <- !isTRUE(connect_cloud_runtime)
 
     ## ── Data loaded gate ────────────────────────────────────────────────
 
@@ -562,6 +579,10 @@ mod_data_overview_server <- function(id, rv) {
 
     ## ── Session save ────────────────────────────────────────────────────
     observeEvent(input$save_session, {
+      if (!session_persistence_enabled) {
+        return(invisible(NULL))
+      }
+
       req(input$session_name, nchar(trimws(input$session_name)) > 0)
       session_name <- trimws(input$session_name)
 
@@ -615,6 +636,10 @@ mod_data_overview_server <- function(id, rv) {
 
     ## ── Refresh session list ────────────────────────────────────────────
     refresh_session_list <- function() {
+      if (!session_persistence_enabled) {
+        return(invisible(NULL))
+      }
+
       sessions_dir <- file.path(project_root, "outputs", "sessions")
       if (dir.exists(sessions_dir)) {
         files <- list.files(sessions_dir, pattern = "\\.rds$", full.names = FALSE)
@@ -630,14 +655,18 @@ mod_data_overview_server <- function(id, rv) {
       updateSelectInput(session, "load_session_select", choices = choices)
     }
 
-    observe({ refresh_session_list() })
-    observeEvent(input$refresh_sessions, { refresh_session_list() })
+    if (session_persistence_enabled) {
+      observe({ refresh_session_list() })
+      observeEvent(input$refresh_sessions, { refresh_session_list() })
+    }
 
     observeEvent(rv$app_reset_nonce, {
       upload_error(NULL)
-      refresh_session_list()
-      updateTextInput(session, "session_name", value = "")
-      updateSelectInput(session, "load_session_select", selected = "(none)")
+      if (session_persistence_enabled) {
+        refresh_session_list()
+        updateTextInput(session, "session_name", value = "")
+        updateSelectInput(session, "load_session_select", selected = "(none)")
+      }
       session$sendCustomMessage("clearFileInput",
                                 list(id = ns("upload_file")))
       session$sendCustomMessage("clearModalBackdrop", list())
@@ -645,6 +674,10 @@ mod_data_overview_server <- function(id, rv) {
 
     ## ── Session load ────────────────────────────────────────────────────
     observeEvent(input$load_session_btn, {
+      if (!session_persistence_enabled) {
+        return(invisible(NULL))
+      }
+
       req(input$load_session_select, input$load_session_select != "(none)")
       session_name <- input$load_session_select
 

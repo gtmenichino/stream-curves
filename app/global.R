@@ -16,6 +16,17 @@ if (basename(getwd()) == "app") {
   project_root <- normalizePath(".", winslash = "/")
 }
 
+is_connect_cloud_runtime <- function() {
+  if (nzchar(Sys.getenv("RSC_PRIMARY_DOC", ""))) {
+    return(TRUE)
+  }
+
+  rsc_env <- Sys.getenv()
+  any(startsWith(names(rsc_env), "RSC_") & nzchar(unname(rsc_env)))
+}
+
+connect_cloud_runtime <- is_connect_cloud_runtime()
+
 ## ── Load packages ────────────────────────────────────────────────────────────
 suppressPackageStartupMessages({
   library(shiny)
@@ -108,7 +119,9 @@ qa_log <- clean_result$qa_log
 precheck_df <- run_metric_precheck(data, metric_config)
 
 ## ── Create sessions directory ────────────────────────────────────────────────
-dir.create(file.path(project_root, "outputs", "sessions"),
-           showWarnings = FALSE, recursive = TRUE)
+if (!isTRUE(connect_cloud_runtime)) {
+  dir.create(file.path(project_root, "outputs", "sessions"),
+             showWarnings = FALSE, recursive = TRUE)
+}
 
 cli::cli_alert_success("App startup complete: {nrow(data)} rows, {ncol(data)} cols, {nrow(precheck_df)} metrics prechecked")

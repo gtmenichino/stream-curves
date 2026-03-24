@@ -7,7 +7,6 @@ The repository includes:
 - A Shiny app for interactive data loading, reference-curve analysis, and regional-curve analysis
 - A scripted pipeline for running the same analysis from the command line
 - YAML registries that define metrics, predictors, stratifications, and output behavior
-- A small example dataset used by the app and pipeline
 - Report templates, archive material, and reference documents
 
 ## Requirements
@@ -48,11 +47,11 @@ shiny::runApp("app")
 
 This is the recommended local-development entrypoint. The repo-root `app.R` is reserved for Posit Connect Cloud deployment.
 
-The app ships with a built-in example dataset and also accepts user uploads in CSV or XLSX format.
+The app starts without data and accepts user uploads in CSV or XLSX format.
 
 Current top-level app areas:
 
-- `Data & Setup`: load demo data or upload a dataset, review validation output, and edit config-backed settings
+- `Data & Setup`: upload a dataset, review validation output, and edit config-backed settings
 - `Reference Curves`: recompute per-metric reference-curve analyses and open the four analysis workspaces
 - `Regional Curves`: fit and review regional-curve models
 
@@ -64,11 +63,13 @@ Run the full pipeline:
 source("run_all.R")
 ```
 
+Set `csv_path` in `run_all.R` before running it.
+
 Run a single metric:
 
 ```r
 source("R/run_pipeline.R")
-run_pipeline(metrics = "perRiffle")
+run_pipeline(csv_path = "path/to/data.csv", metrics = "perRiffle")
 ```
 
 Outputs are written to timestamped folders under `outputs/`, which is intentionally ignored from version control.
@@ -107,7 +108,6 @@ stream-curves/
 |- R/            Analysis pipeline functions
 |- config/       YAML registries for metrics, predictors, stratifications, and outputs
 |- data/
-|  |- raw/       Source data files, including the example dataset
 |  `- derived/   Derived datasets created by the pipeline (ignored)
 |- reports/      Quarto report templates
 |- scripts/      Project utility scripts, including manifest generation
@@ -132,8 +132,8 @@ The app and the scripted pipeline both read from the same configuration layer.
 
 ## Data Notes
 
-- `data/raw/data_example.csv` is a small example dataset included for demonstration and testing.
-- Uploaded datasets can be provided as CSV or XLSX.
+- Uploaded datasets can be provided as CSV or XLSX in the app.
+- The scripted pipeline currently accepts CSV input via the required `csv_path` argument.
 - Character fields are trimmed during import, and derived variables are computed when required source columns are available.
 
 ## Reports

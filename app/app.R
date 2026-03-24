@@ -40,10 +40,6 @@ server <- function(input, output, session) {
     qa_log = NULL,
     precheck_df = NULL,
 
-    builtin_data = data,
-    builtin_qa_log = qa_log,
-    builtin_precheck_df = precheck_df,
-
     data_source = NULL,
     data_fingerprint = NULL,
     upload_filename = NULL,

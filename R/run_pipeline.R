@@ -9,20 +9,43 @@ library(readr)
 #'
 #' @param config_dir Path to config directory (default "config")
 #' @param data_dir Path to data directory (default "data")
+#' @param csv_path Path to the input CSV data file
 #' @param output_dir Path to outputs directory (default "outputs")
 #' @param metrics Character vector of metric keys to process (NULL = all)
 #' @param seed Random seed (default 42)
 #' @param n_cores Number of parallel workers (default: all cores minus 1)
 #' @return invisible(run_dir) — path to the timestamped output directory
 run_pipeline <- function(config_dir = "config",
-                          data_dir   = "data",
-                          output_dir = "outputs",
-                          metrics    = NULL,
-                          seed       = 42,
-                          n_cores    = max(1L, parallel::detectCores() - 1L)) {
+                         data_dir   = "data",
+                         csv_path   = NULL,
+                         output_dir = "outputs",
+                         metrics    = NULL,
+                         seed       = 42,
+                         n_cores    = max(1L, parallel::detectCores() - 1L)) {
 
   pipeline_start <- Sys.time()
   set.seed(seed)
+
+  if (is.null(csv_path) || !nzchar(csv_path)) {
+    stop(
+      "csv_path is required. Provide the path to your input CSV when calling run_pipeline().",
+      call. = FALSE
+    )
+  }
+
+  if (tolower(tools::file_ext(csv_path)) != "csv") {
+    stop(
+      "run_pipeline() currently supports CSV input only. Provide a .csv file path.",
+      call. = FALSE
+    )
+  }
+
+  if (!file.exists(csv_path)) {
+    stop(
+      paste0("Input CSV not found: ", csv_path),
+      call. = FALSE
+    )
+  }
 
   ## ── Set up parallel backend ──────────────────────────────────────────────
   if (n_cores > 1L && requireNamespace("future", quietly = TRUE) &&
@@ -125,7 +148,7 @@ run_pipeline <- function(config_dir = "config",
 
   raw_data <- tryCatch({
     load_data(
-      csv_path  = file.path(data_dir, "raw", "data_example.csv")
+      csv_path = csv_path
     )
   }, error = function(e) {
     cli::cli_alert_danger("Data loading failed: {e$message}")

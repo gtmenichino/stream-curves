@@ -15,8 +15,8 @@ mod_landing_v2_ui <- function(id) {
       card_body(
         p("This application guides you through a structured, 4-phase evaluation
            of stratification variables and reference curve development for geomorphic
-           metrics. It ships with a synthetic example dataset for exploring the
-           workflow — upload your own data for actual analysis."),
+           metrics. Upload your own dataset to begin the workflow and run
+           the analysis."),
         p("For each metric, you will explore candidate stratifications, verify
            consistency across metrics, confirm your selection, then build and
            finalize reference curves scored on a 0\u20131 scale.")

@@ -1,0 +1,120 @@
+---
+title: "StreamCurves — Geomorphic Reference Curve Analysis Board"
+subtitle: "Multi-Metric Analysis Summary"
+format:
+  pdf:
+    documentclass: article
+    papersize: custom
+    paperwidth: 36in
+    paperheight: 24in
+    geometry:
+      - margin=0.5in
+    keep-tex: false
+    fig-width: 5
+    fig-height: 3
+params:
+  run_dir: "../outputs/run_latest"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(gt)
+library(patchwork)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+run_dir <- params$run_dir
+if (!dir.exists(run_dir)) {
+  all_runs <- list.dirs("../outputs", recursive = FALSE, full.names = TRUE)
+  all_runs <- sort(all_runs, decreasing = TRUE)
+  if (length(all_runs) > 0) run_dir <- all_runs[1]
+}
+
+tables_dir <- file.path(run_dir, "tables")
+plots_dir  <- file.path(run_dir, "plots")
+
+safe_read <- function(path) {
+  if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE)
+  else tibble::tibble()
+}
+```
+
+# StreamCurves — Geomorphic Reference Curve Analysis
+
+## Metric Screening Matrix
+
+```{r screening-matrix, fig.width=30, fig.height=8}
+strat_results <- safe_read(file.path(tables_dir, "stratification_screening.csv"))
+if (nrow(strat_results) > 0) {
+  matrix_data <- strat_results |>
+    mutate(sig_label = case_when(
+      is.na(p_value) ~ "",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      p_value < 0.10 ~ ".",
+      TRUE ~ ""
+    )) |>
+    select(metric, stratification, p_value, sig_label)
+
+  ggplot(matrix_data, aes(x = stratification, y = metric, fill = p_value)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = sig_label), size = 6) +
+    scale_fill_gradient2(low = "darkgreen", mid = "yellow", high = "gray90",
+                         midpoint = 0.05, na.value = "white",
+                         limits = c(0, 1)) +
+    labs(title = "Stratification Screening: p-values",
+         subtitle = "** p<0.01, * p<0.05, . p<0.10",
+         x = "Stratification Variable", y = "Metric", fill = "p-value") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          axis.text.y = element_text(size = 8))
+}
+```
+
+## Model Selection Summary
+
+```{r model-summary, fig.width=20, fig.height=6}
+model_sel <- safe_read(file.path(tables_dir, "model_selections.csv"))
+diag_summary <- safe_read(file.path(tables_dir, "diagnostic_summary.csv"))
+ref_curves <- safe_read(file.path(tables_dir, "reference_curves.csv"))
+
+if (nrow(model_sel) > 0) {
+  summary_table <- model_sel |>
+    left_join(diag_summary |> select(metric, overall_status), by = "metric") |>
+    left_join(ref_curves |> select(metric, q25, q75, curve_status), by = "metric") |>
+    select(metric, predictors, n_predictors, adj_r2, bic, n_top_models,
+           overall_status, q25, q75, needs_review)
+
+  gt::gt(summary_table) |>
+    gt::fmt_number(columns = c(adj_r2), decimals = 3) |>
+    gt::fmt_number(columns = c(bic), decimals = 1) |>
+    gt::fmt_number(columns = c(q25, q75), decimals = 1) |>
+    gt::tab_header(
+      title = "Model Selection & Diagnostics Summary",
+      subtitle = "All metrics with selected models"
+    )
+}
+```
+
+## Reference Curve Thresholds
+
+```{r ref-thresholds, fig.width=20, fig.height=6}
+if (nrow(ref_curves) > 0) {
+  ref_plot_data <- ref_curves |>
+    filter(curve_status == "complete") |>
+    mutate(metric = fct_reorder(metric, q75))
+
+  ggplot(ref_plot_data, aes(y = metric)) +
+    geom_segment(aes(x = not_functioning_min, xend = not_functioning_max,
+                     yend = metric), color = "red", linewidth = 3, alpha = 0.5) +
+    geom_segment(aes(x = at_risk_min, xend = at_risk_max,
+                     yend = metric), color = "orange", linewidth = 3, alpha = 0.5) +
+    geom_segment(aes(x = functioning_min, xend = functioning_max,
+                     yend = metric), color = "green", linewidth = 3, alpha = 0.5) +
+    geom_point(aes(x = q25), shape = "|", size = 4) +
+    geom_point(aes(x = q75), shape = "|", size = 4) +
+    labs(title = "Reference Curve Functional Categories",
+         subtitle = "Green=Functioning | Orange=At-Risk | Red=Not Functioning",
+         x = "Metric Value", y = "") +
+    theme_minimal()
+}
+```

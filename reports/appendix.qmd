@@ -1,0 +1,200 @@
+---
+title: "StreamCurves — Geomorphic Reference Curve Analysis"
+subtitle: "Technical Appendix"
+format:
+  pdf:
+    documentclass: article
+    papersize: letter
+    geometry:
+      - margin=1in
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    keep-tex: false
+    fig-width: 7
+    fig-height: 5
+params:
+  run_dir: "../outputs/run_latest"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(gt)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.align = "center")
+
+run_dir <- params$run_dir
+if (!dir.exists(run_dir)) {
+  all_runs <- list.dirs("../outputs", recursive = FALSE, full.names = TRUE)
+  all_runs <- sort(all_runs, decreasing = TRUE)
+  if (length(all_runs) > 0) run_dir <- all_runs[1]
+}
+
+tables_dir <- file.path(run_dir, "tables")
+plots_dir  <- file.path(run_dir, "plots")
+
+safe_read <- function(path) {
+  if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE)
+  else tibble::tibble()
+}
+```
+
+# Introduction
+
+This appendix provides the complete technical analysis for all StreamCurves geomorphic reference-curve metrics. Each metric section includes data quality checks, stratification screening, model selection, diagnostics, and reference curve development.
+
+# Data Quality
+
+## Metric Precheck
+
+```{r precheck}
+precheck <- safe_read(file.path(tables_dir, "metric_precheck.csv"))
+if (nrow(precheck) > 0) {
+  gt::gt(precheck |> select(metric, display_name, n_obs, n_missing, min, median, max, sd, precheck_status)) |>
+    gt::fmt_number(columns = c(min, median, max, sd), decimals = 2) |>
+    gt::tab_header(title = "Metric Data Quality Summary")
+}
+```
+
+# Stratification Analysis
+
+## Screening Results
+
+```{r strat-screening}
+strat_results <- safe_read(file.path(tables_dir, "stratification_screening.csv"))
+if (nrow(strat_results) > 0) {
+  gt::gt(strat_results |>
+    select(metric, stratification, test, statistic, p_value, n_groups, min_group_n, classification) |>
+    mutate(p_value = round(p_value, 4), statistic = round(statistic, 2))
+  ) |>
+    gt::tab_header(title = "Stratification Screening Results")
+}
+```
+
+## Decisions
+
+```{r strat-decisions}
+strat_dec <- safe_read(file.path(tables_dir, "stratification_decisions.csv"))
+if (nrow(strat_dec) > 0) {
+  gt::gt(strat_dec) |>
+    gt::fmt_number(columns = where(is.numeric), decimals = 4) |>
+    gt::tab_header(title = "Stratification Decisions")
+}
+```
+
+# Per-Metric Analysis
+
+```{r per-metric, results='asis', fig.width=7, fig.height=5}
+model_sel <- safe_read(file.path(tables_dir, "model_selections.csv"))
+model_cands <- safe_read(file.path(tables_dir, "model_candidates.csv"))
+diag_summary <- safe_read(file.path(tables_dir, "diagnostic_summary.csv"))
+ref_curves <- safe_read(file.path(tables_dir, "reference_curves.csv"))
+
+if (nrow(model_sel) > 0) {
+  for (i in seq_len(nrow(model_sel))) {
+    mk <- model_sel$metric[i]
+    cat("\n\n## ", mk, "\n\n")
+
+    # Model selection
+    sel <- model_sel |> filter(metric == mk)
+    cat("**Selected model:** ", sel$predictors, "\n\n")
+    cat("**Adj R²:** ", round(sel$adj_r2, 3), " | **BIC:** ", round(sel$bic, 1),
+        " | **Top models:** ", sel$n_top_models, "\n\n")
+
+    # Diagnostics
+    diag <- diag_summary |> filter(metric == mk)
+    if (nrow(diag) > 0) {
+      cat("**Diagnostics:** ", diag$overall_status,
+          " (Shapiro p=", round(diag$shapiro_p, 4),
+          ", BP p=", round(diag$bp_p, 4),
+          ", Max VIF=", round(diag$max_vif, 2), ")\n\n")
+    }
+
+    # Reference curve
+    rc <- ref_curves |> filter(metric == mk)
+    if (nrow(rc) > 0) {
+      cat("**Reference IQR:** [", round(rc$q25, 1), ", ", round(rc$q75, 1), "]\n\n")
+    }
+
+    # Include diagnostic plot if exists
+    diag_plot <- file.path(plots_dir, paste0(mk, "_diagnostic_4panel.png"))
+    if (file.exists(diag_plot)) {
+      cat("![", mk, " Diagnostics](", diag_plot, ")\n\n")
+    }
+
+    # Include reference bar chart if exists
+    bar_plot <- file.path(plots_dir, paste0(mk, "_reference_bar_chart.png"))
+    if (file.exists(bar_plot)) {
+      cat("![", mk, " Reference Bar Chart](", bar_plot, ")\n\n")
+    }
+
+    # Include reference curve plot if exists
+    ref_plot <- file.path(plots_dir, paste0(mk, "_reference_curve.png"))
+    if (file.exists(ref_plot)) {
+      cat("![", mk, " Reference Curve](", ref_plot, ")\n\n")
+    }
+
+    cat("\\newpage\n\n")
+  }
+}
+```
+
+# Cross-Metric Analysis
+
+## Correlation Analysis
+
+```{r cross-metric}
+redundancy <- safe_read(file.path(tables_dir, "metric_redundancy_results.csv"))
+if (nrow(redundancy) > 0) {
+  gt::gt(redundancy |>
+    filter(abs_pearson > 0.5) |>
+    arrange(desc(abs_pearson)) |>
+    select(display_1, display_2, pearson_r, spearman_rho, redundant_flag)
+  ) |>
+    gt::fmt_number(columns = c(pearson_r, spearman_rho), decimals = 3) |>
+    gt::tab_header(title = "Metric Pairs with |r| > 0.50")
+}
+
+# Include correlation heatmap
+heatmap_path <- file.path(plots_dir, "correlation_heatmap.png")
+if (file.exists(heatmap_path)) {
+  knitr::include_graphics(heatmap_path)
+}
+```
+
+# Regional Curves
+
+```{r regional}
+regional <- safe_read(file.path(tables_dir, "regional_curves_results.csv"))
+if (nrow(regional) > 0) {
+  gt::gt(regional |>
+    select(response, predictor, group_var, group_level, n_obs,
+           coefficient_a, exponent_b, r_squared, fit_status)
+  ) |>
+    gt::fmt_number(columns = c(coefficient_a, exponent_b, r_squared), decimals = 3) |>
+    gt::tab_header(title = "Regional Hydraulic Geometry Curves")
+}
+```
+
+# QA Summary
+
+```{r qa}
+qa_log <- safe_read(file.path(run_dir, "logs", "qa_log.csv"))
+if (nrow(qa_log) > 0) {
+  gt::gt(qa_log) |> gt::tab_header(title = "QA Log")
+}
+
+pipeline_log <- safe_read(file.path(run_dir, "logs", "pipeline_log.csv"))
+if (nrow(pipeline_log) > 0) {
+  gt::gt(pipeline_log) |> gt::tab_header(title = "Pipeline Execution Log")
+}
+```
+
+# Session Information
+
+```{r session-info}
+session_path <- file.path(run_dir, "manifest", "session_info.txt")
+if (file.exists(session_path)) {
+  cat(readLines(session_path), sep = "\n")
+}
+```

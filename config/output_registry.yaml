@@ -1,0 +1,95 @@
+# ── Output Registry ─────────────────────────────────────────────────────────
+# Defines which outputs to generate per metric and for summary analyses.
+
+per_metric_outputs:
+  precheck:
+    enabled: true
+    files:
+      - "{metric}_precheck.csv"
+  stratification:
+    enabled: true
+    files:
+      - "{metric}_stratification_screening.csv"
+      - "{metric}_stratification_pairwise.csv"
+      - "{metric}_stratification_decision.csv"
+    plots:
+      - "{metric}_boxplot_{strat_var}.png"
+  model_candidates:
+    enabled: true
+    files:
+      - "{metric}_model_candidates.csv"
+      - "{metric}_predictor_importance.csv"
+    plots:
+      - "{metric}_bic_vs_npred.png"
+      - "{metric}_adjr2_vs_npred.png"
+      - "{metric}_model_heatmap.png"
+      - "{metric}_predictor_importance.png"
+  model_selection:
+    enabled: true
+    files:
+      - "{metric}_model_selection.csv"
+  diagnostics:
+    enabled: true
+    files:
+      - "{metric}_diagnostics.csv"
+    plots:
+      - "{metric}_diagnostic_4panel.png"
+  reference_curves:
+    enabled: true
+    files:
+      - "{metric}_reference_curve.csv"
+    plots:
+      - "{metric}_reference_bar_chart.png"
+      - "{metric}_reference_curve.png"
+  rds_objects:
+    enabled: true
+    files:
+      - "{metric}_model_object.rds"
+
+summary_outputs:
+  cross_metric:
+    enabled: true
+    files:
+      - metric_correlation_matrix.csv
+      - metric_redundancy_results.csv
+    plots:
+      - correlation_heatmap.png
+      - pca_biplot.png
+  regional_curves:
+    enabled: true
+    files:
+      - regional_curves_results.csv
+    plots:
+      - regional_curve_{response}_{strat}.png
+  manifest:
+    enabled: true
+    files:
+      - run_manifest.json
+      - session_info.txt
+      - qa_summary.csv
+  pipeline_log:
+    enabled: true
+    files:
+      - pipeline_log.csv
+
+report_products:
+  dashboard:
+    enabled: true
+    file: "reports/dashboard.qmd"
+    format: html
+    tier: 1
+  poster:
+    enabled: true
+    file: "reports/poster.qmd"
+    format: pdf
+    tier: 2
+  summary:
+    enabled: true
+    file: "reports/summary.qmd"
+    format: pdf
+    tier: 3
+  appendix:
+    enabled: true
+    file: "reports/appendix.qmd"
+    format: pdf
+    tier: 4

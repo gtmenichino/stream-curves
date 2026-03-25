@@ -219,18 +219,11 @@ reset_app_to_startup <- function(rv) {
 
 
 launch_workspace_modal <- function(rv, phase, metric = NULL) {
-  old_metric <- rv$current_metric %||% NULL
-
-  if (!is.null(metric) && !identical(metric, old_metric)) {
-    if (!is.null(old_metric) && nzchar(old_metric)) {
-      save_metric_phase_state(rv, old_metric)
-    }
-    rv$current_metric <- metric
-    restore_metric_phase_state(rv, metric)
-  }
-
   rv$workspace_modal_type <- phase
   rv$workspace_modal_metric <- metric %||% rv$current_metric %||% NULL
+  rv$workspace_modal_stage <- "loading"
+  rv$workspace_modal_error <- NULL
+  rv$workspace_modal_loading_detail <- NULL
   rv$workspace_modal_nonce <- isolate(rv$workspace_modal_nonce %||% 0L) + 1L
   invisible(NULL)
 }

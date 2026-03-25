@@ -226,12 +226,12 @@ build_reference_curve <- function(data, metric_key, metric_config,
         ggplot2::annotate("label", x = as.numeric(q25), y = 0.02,
                            label = paste0("Q25=", round(q25, 1)),
                            size = 3, color = "darkgreen",
-                           fill = "white", alpha = 0.7, label.size = 0,
+                           fill = "white", alpha = 0.7, border.colour = NA,
                            label.padding = ggplot2::unit(0.15, "lines")) +
         ggplot2::annotate("label", x = as.numeric(q75), y = 0.02,
                            label = paste0("Q75=", round(q75, 1)),
                            size = 3, color = "darkgreen",
-                           fill = "white", alpha = 0.7, label.size = 0,
+                           fill = "white", alpha = 0.7, border.colour = NA,
                            label.padding = ggplot2::unit(0.15, "lines")) +
         ## Band labels on the right
         ggplot2::annotate("text", x = x_hi, y = 0.85, label = "Functioning",

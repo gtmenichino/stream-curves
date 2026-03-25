@@ -16,34 +16,75 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
     ns <- session$ns
     prev_metric <- reactiveVal(NULL)
     verify_data <- reactiveVal(NULL)
+    artifacts_loading <- reactiveVal(FALSE)
+    artifacts_error <- reactiveVal(NULL)
 
-    restore_verify_state <- function(metric = rv$current_metric) {
+    set_verify_state <- function(metric = rv$current_metric) {
       if (is.null(metric) || identical(metric, "")) {
         verify_data(NULL)
         return(invisible(NULL))
       }
 
+      verify_data(get_metric_phase3_display_state(rv, metric))
+      invisible(NULL)
+    }
+
+    refresh_verify_artifacts <- function(metric = rv$current_metric, defer = FALSE) {
       needs_phase1 <- metric_needs_phase1_artifact_refresh(rv, metric)
       needs_phase3 <- metric_needs_phase3_artifact_refresh(rv, metric)
-      total_steps <- sum(needs_phase1, needs_phase3)
 
-      if (total_steps > 0) {
+      if (!(isTRUE(needs_phase1) || isTRUE(needs_phase3))) {
+        artifacts_loading(FALSE)
+        artifacts_error(NULL)
+        set_verify_state(metric)
+        return(invisible(FALSE))
+      }
+
+      artifacts_loading(TRUE)
+      artifacts_error(NULL)
+
+      run_refresh <- function() {
+        tryCatch(
+          {
+            if (isTRUE(needs_phase1)) {
+              ensure_metric_phase1_artifacts(rv, metric)
+            }
+            if (isTRUE(needs_phase3)) {
+              ensure_metric_phase3_artifacts(rv, metric)
+            }
+            artifacts_error(NULL)
+          },
+          error = function(e) {
+            artifacts_error(conditionMessage(e))
+          },
+          finally = {
+            artifacts_loading(FALSE)
+            set_verify_state(metric)
+          }
+        )
+      }
+
+      if (isTRUE(defer)) {
+        target_metric <- metric
+        session$onFlushed(function() {
+          if (is.null(target_metric) || identical(target_metric, "")) return(invisible(NULL))
+          shiny::isolate(run_refresh())
+          invisible(NULL)
+        }, once = TRUE)
+      } else {
         withProgress(message = "Loading Phase 3 workspace...", value = 0, {
           if (isTRUE(needs_phase1)) {
             incProgress(0, detail = "Regenerating Phase 1 boxplots...")
-            ensure_metric_phase1_artifacts(rv, metric)
-            incProgress(1 / total_steps)
           }
           if (isTRUE(needs_phase3)) {
             incProgress(0, detail = "Regenerating Phase 3 verification outputs...")
-            ensure_metric_phase3_artifacts(rv, metric)
-            incProgress(1 / total_steps)
           }
+          run_refresh()
+          incProgress(1)
         })
       }
 
-      verify_data(get_metric_phase3_display_state(rv, metric))
-      invisible(NULL)
+      invisible(TRUE)
     }
 
     ## ── Data gate: show alert or full page ────────────────────────────────────
@@ -62,6 +103,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
             p(tags$strong("Requires:"), " Phase 1 completed for this metric.")
           ),
           uiOutput(ns("metric_info_brief")),
+          uiOutput(ns("artifact_status")),
           uiOutput(ns("verification_ui"))
         ))
       }
@@ -86,6 +128,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
             p(tags$strong("Requires:"), " Phase 1 completed for this metric.")
           ),
 
+          uiOutput(ns("artifact_status")),
           uiOutput(ns("verification_ui"))
         )
       )
@@ -121,13 +164,51 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
       rv$current_metric <- new_metric
       prev_metric(new_metric)
       restore_metric_phase_state(rv, new_metric)
-      restore_verify_state(new_metric)
+      set_verify_state(new_metric)
+      if (!isTRUE(dialog_mode)) {
+        refresh_verify_artifacts(new_metric, defer = FALSE)
+      }
     }, ignoreInit = TRUE)
 
-    observeEvent(rv$workspace_modal_nonce, {
+    observeEvent(rv$workspace_modal_ready_nonce, {
       if (isTRUE(dialog_mode) && identical(rv$workspace_modal_type, "phase3")) {
-        restore_verify_state(rv$current_metric)
+        modal_metric <- rv$workspace_modal_metric %||% rv$current_metric
+        if (is.null(modal_metric) || identical(modal_metric, "")) return(invisible(NULL))
+        artifacts_loading(FALSE)
+        artifacts_error(NULL)
+        set_verify_state(modal_metric)
       }
+    }, ignoreInit = TRUE)
+
+    output$artifact_status <- renderUI({
+      loading <- artifacts_loading()
+      error_text <- artifacts_error()
+
+      if (isTRUE(loading)) {
+        return(div(
+          class = "alert alert-info d-flex align-items-center gap-2",
+          icon("spinner", class = "fa-spin"),
+          tags$span("Loading full Phase 3 details. Finalist selections are ready while verification plots and tables regenerate.")
+        ))
+      }
+
+      if (!is.null(error_text) && nzchar(error_text)) {
+        return(div(
+          class = "alert alert-danger d-flex justify-content-between align-items-center flex-wrap gap-2",
+          tags$span(paste0("Could not load full Phase 3 details: ", error_text)),
+          actionButton(
+            ns("retry_artifacts"),
+            "Retry details",
+            class = "btn btn-outline-danger btn-sm"
+          )
+        ))
+      }
+
+      NULL
+    })
+
+    observeEvent(input$retry_artifacts, {
+      refresh_verify_artifacts(rv$current_metric, defer = FALSE)
     }, ignoreInit = TRUE)
 
     ## Brief metric info
@@ -602,12 +683,15 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
       vd <- verify_data()
       req(vd)
 
+      metric <- rv$current_metric
       choice <- input$final_strat_choice
       rationale <- input$justification %||% ""
       strat_mode <- input$strat_mode %||% "covariate"
+      old_phase4_signature <- get_metric_phase4_signature(rv, metric)
+      had_phase4_results <- metric_has_any_phase4_results(rv, metric)
 
       ## Store verification results per metric
-      rv$phase3_verification[[rv$current_metric]] <- list(
+      rv$phase3_verification[[metric]] <- list(
         finalists = vd$strats,
         pattern_results = vd$patterns,
         feasibility_results = vd$feasibility,
@@ -619,17 +703,17 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
         justification = rationale
       )
 
-      if (is.null(rv$metric_phase_cache[[rv$current_metric]])) {
-        rv$metric_phase_cache[[rv$current_metric]] <- list()
+      if (is.null(rv$metric_phase_cache[[metric]])) {
+        rv$metric_phase_cache[[metric]] <- list()
       }
-      rv$metric_phase_cache[[rv$current_metric]]$phase3_patterns <- rv$phase3_patterns
-      rv$metric_phase_cache[[rv$current_metric]]$phase3_feasibility <- rv$phase3_feasibility
-      rv$metric_phase_cache[[rv$current_metric]]$phase3_artifact_mode <- "full"
+      rv$metric_phase_cache[[metric]]$phase3_patterns <- rv$phase3_patterns
+      rv$metric_phase_cache[[metric]]$phase3_feasibility <- rv$phase3_feasibility
+      rv$metric_phase_cache[[metric]]$phase3_artifact_mode <- "full"
 
       ## Set strat_decision_user (same field name — Phase 4 reads this)
       if (choice == "none") {
         rv$strat_decision_user <- tibble::tibble(
-          metric = rv$current_metric,
+          metric = metric,
           decision_type = "none",
           selected_strat = NA_character_,
           selected_p_value = NA_real_,
@@ -642,7 +726,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
           notes = rationale
         )
       } else {
-        l1_results <- rv$all_layer1_results[[rv$current_metric]]
+        l1_results <- rv$all_layer1_results[[metric]]
         row <- if (!is.null(l1_results)) {
           l1_results |> dplyr::filter(stratification == choice)
         } else {
@@ -650,7 +734,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
         }
 
         rv$strat_decision_user <- tibble::tibble(
-          metric = rv$current_metric,
+          metric = metric,
           decision_type = "single",
           selected_strat = choice,
           selected_p_value = if (nrow(row) > 0) row$p_value[1] else NA_real_,
@@ -663,14 +747,20 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
           notes = rationale
         )
       }
-      rv$metric_phase_cache[[rv$current_metric]]$strat_decision_user <- rv$strat_decision_user
+      rv$metric_phase_cache[[metric]]$strat_decision_user <- rv$strat_decision_user
+
+      new_phase4_signature <- build_metric_phase4_signature(rv, metric, rv$strat_decision_user)
+      if (isTRUE(had_phase4_results) &&
+          !phase4_signature_matches(old_phase4_signature, new_phase4_signature)) {
+        clear_metric_phase4_results(rv, metric)
+      }
 
       ## Append to decision log
       new_entry <- tibble::tibble(
         entry_id = paste0(format(Sys.time(), "%Y%m%d_%H%M%S"), "_", sample(1000:9999, 1)),
         timestamp = Sys.time(),
         reviewer_name = "",
-        metric = rv$current_metric,
+        metric = metric,
         decision_stage = "stratification",
         phase = "phase3",
         selected_strat = if (choice == "none") NA_character_ else choice,
@@ -701,13 +791,13 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
       rv$decision_log <- dplyr::bind_rows(rv$decision_log, new_entry)
 
       showNotification(
-        paste0("Phase 3 confirmed for ", rv$metric_config[[rv$current_metric]]$display_name,
+        paste0("Phase 3 confirmed for ", rv$metric_config[[metric]]$display_name,
                ". Proceed to Phase 4."),
         type = "message", duration = 3
       )
       notify_workspace_refresh(rv)
       removeModal(session = parent_session %||% session)
-      launch_workspace_modal(rv, "phase4", rv$current_metric)
+      launch_workspace_modal(rv, "phase4", metric)
     })
   })
 }

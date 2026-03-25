@@ -32,11 +32,31 @@ mod_ref_curve_server <- function(id, rv) {
     ## ── Build reference curve automatically ───────────────────────────────────
     curve_results <- reactive({
       req(rv$current_metric)
+      metric <- rv$current_metric
+      decision_tbl <- get_metric_phase4_decision_state(rv, metric)
+
+      if (is.null(rv$current_stratum_level) && metric_has_phase4_cache(rv, metric, decision_tbl)) {
+        cached <- get_metric_phase4_cached_result(rv, metric)
+        if (!is.null(cached$reference_curve)) {
+          rv$reference_curve <- cached$reference_curve
+          return(cached$reference_curve)
+        }
+      }
+
       analysis_data <- rv$phase4_data %||% rv$data
-      result <- build_reference_curve(analysis_data, rv$current_metric,
-                                       rv$metric_config,
-                                       stratum_label = rv$current_stratum_level)
+      result <- build_reference_curve(
+        analysis_data,
+        metric,
+        rv$metric_config,
+        stratum_label = rv$current_stratum_level
+      )
       rv$reference_curve <- result
+      cache_metric_phase4_results(
+        rv,
+        metric,
+        decision_tbl = decision_tbl,
+        reference_curve = result
+      )
       result
     })
 
@@ -257,9 +277,16 @@ mod_ref_curve_server <- function(id, rv) {
       }
 
       ## Non-stratified: mark complete directly
+      phase4_signature <- cache_metric_phase4_results(
+        rv,
+        mk,
+        decision_tbl = get_metric_phase4_decision_state(rv, mk),
+        reference_curve = rv$reference_curve
+      )
       rv$completed_metrics[[mk]] <- list(
         strat_decision = rv$strat_decision_user,
-        reference_curve = rv$reference_curve
+        reference_curve = rv$reference_curve,
+        phase4_signature = phase4_signature
       )
 
       showNotification(

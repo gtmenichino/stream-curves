@@ -212,6 +212,11 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       get_stratification_values(rv$data, info$strat_var, rv$strat_config)
     })
 
+    current_phase4_decision <- reactive({
+      req(rv$current_metric)
+      get_metric_phase4_decision_state(rv, rv$current_metric)
+    })
+
     ## -- Metric change observer ------------------------------------------------
     observeEvent(input$metric_select, {
       old_metric <- prev_metric()
@@ -230,9 +235,19 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       sync_phase4_inputs(new_metric)
     }, ignoreInit = TRUE)
 
-    observeEvent(rv$workspace_modal_nonce, {
+    observeEvent(rv$workspace_modal_ready_nonce, {
       if (isTRUE(dialog_mode) && identical(rv$workspace_modal_type, "phase4")) {
-        sync_phase4_inputs(rv$current_metric)
+        modal_metric <- rv$workspace_modal_metric %||% rv$current_metric
+        session$onFlushed(function() {
+          if (is.null(modal_metric) || identical(modal_metric, "")) {
+            return(invisible(NULL))
+          }
+          shiny::isolate({
+            sync_phase4_inputs(modal_metric)
+            invisible(NULL)
+          })
+          invisible(NULL)
+        }, once = TRUE)
       }
     }, ignoreInit = TRUE)
 
@@ -400,6 +415,19 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       req(info$has_strata)
       metric <- rv$current_metric
       req(metric)
+      decision_tbl <- current_phase4_decision()
+
+      if (metric_has_phase4_cache(rv, metric, decision_tbl)) {
+        cached <- get_metric_phase4_cached_result(rv, metric)
+        cached_results <- lapply(info$levels, function(lvl) {
+          cached$stratum_results[[lvl]]$reference_curve %||% NULL
+        })
+        names(cached_results) <- info$levels
+
+        if (all(vapply(cached_results, Negate(is.null), logical(1)))) {
+          return(cached_results)
+        }
+      }
 
       results <- list()
       strat_vals <- strat_values()
@@ -408,6 +436,14 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
         results[[lvl]] <- build_reference_curve(stratum_data, metric,
                                                  rv$metric_config, stratum_label = lvl)
       }
+      cache_metric_phase4_results(
+        rv,
+        metric,
+        decision_tbl = decision_tbl,
+        stratum_results = lapply(results, function(result) {
+          list(reference_curve = result)
+        })
+      )
       results
     })
 
@@ -658,6 +694,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
       results <- all_strata_results()
       req(results)
+      decision_tbl <- current_phase4_decision()
 
       ## Save all strata to rv$stratum_results
       for (lvl in names(results)) {
@@ -666,11 +703,18 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       }
 
       ## Mark metric complete with all strata
+      phase4_signature <- cache_metric_phase4_results(
+        rv,
+        metric,
+        decision_tbl = decision_tbl,
+        stratum_results = rv$stratum_results[[metric]]
+      )
       rv$completed_metrics[[metric]] <- list(
         stratified = TRUE,
         strat_var = info$strat_var,
-        strat_decision = rv$strat_decision_user,
-        stratum_results = rv$stratum_results[[metric]]
+        strat_decision = decision_tbl,
+        stratum_results = rv$stratum_results[[metric]],
+        phase4_signature = phase4_signature
       )
 
       showNotification(

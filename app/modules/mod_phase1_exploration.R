@@ -78,6 +78,8 @@ mod_phase1_exploration_server <- function(id, rv, dialog_mode = FALSE) {
             )
           ),
 
+          uiOutput(ns("artifact_status")),
+
           ## Results section
           uiOutput(ns("results_ui")),
 
@@ -154,6 +156,9 @@ mod_phase1_exploration_server <- function(id, rv, dialog_mode = FALSE) {
       ## RESTORE incoming metric's state
       restore_metric_phase_state(rv, new_metric)
       load_screening_results(new_metric)
+      if (!isTRUE(dialog_mode)) {
+        refresh_screening_artifacts(new_metric, defer = FALSE)
+      }
     }, ignoreInit = TRUE)
 
     ## ── Metric info table (left column) ────────────────────────────────────────
@@ -280,16 +285,10 @@ mod_phase1_exploration_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## ── Run screening + effect size in single pass ────────────────────────────
     screening_results <- reactiveVal(NULL)
+    artifacts_loading <- reactiveVal(FALSE)
+    artifacts_error <- reactiveVal(NULL)
 
-    load_screening_results <- function(metric = rv$current_metric) {
-      if (metric_needs_phase1_artifact_refresh(rv, metric)) {
-        withProgress(message = "Loading Phase 1 workspace...", value = 0, {
-          incProgress(0, detail = "Regenerating screening plots and pairwise tables...")
-          ensure_metric_phase1_artifacts(rv, metric)
-          incProgress(1)
-        })
-      }
-
+    set_screening_state <- function(metric = rv$current_metric) {
       state <- get_metric_phase1_display_state(rv, metric)
       if (!is.null(state) && nrow(state$results) > 0) {
         screening_results(state)
@@ -299,10 +298,95 @@ mod_phase1_exploration_server <- function(id, rv, dialog_mode = FALSE) {
       invisible(NULL)
     }
 
-    observeEvent(rv$workspace_modal_nonce, {
-      if (isTRUE(dialog_mode) && identical(rv$workspace_modal_type, "phase1")) {
-        load_screening_results(rv$current_metric)
+    refresh_screening_artifacts <- function(metric = rv$current_metric, defer = FALSE) {
+      if (!metric_needs_phase1_artifact_refresh(rv, metric)) {
+        artifacts_loading(FALSE)
+        artifacts_error(NULL)
+        set_screening_state(metric)
+        return(invisible(FALSE))
       }
+
+      artifacts_loading(TRUE)
+      artifacts_error(NULL)
+
+      run_refresh <- function() {
+        tryCatch(
+          {
+            ensure_metric_phase1_artifacts(rv, metric)
+            artifacts_error(NULL)
+          },
+          error = function(e) {
+            artifacts_error(conditionMessage(e))
+          },
+          finally = {
+            artifacts_loading(FALSE)
+            set_screening_state(metric)
+          }
+        )
+      }
+
+      if (isTRUE(defer)) {
+        target_metric <- metric
+        session$onFlushed(function() {
+          if (is.null(target_metric) || identical(target_metric, "")) return(invisible(NULL))
+          shiny::isolate(run_refresh())
+          invisible(NULL)
+        }, once = TRUE)
+      } else {
+        withProgress(message = "Loading Phase 1 workspace...", value = 0, {
+          incProgress(0, detail = "Regenerating screening plots and pairwise tables...")
+          run_refresh()
+          incProgress(1)
+        })
+      }
+
+      invisible(TRUE)
+    }
+
+    load_screening_results <- function(metric = rv$current_metric) {
+      artifacts_loading(FALSE)
+      artifacts_error(NULL)
+      set_screening_state(metric)
+      invisible(NULL)
+    }
+
+    observeEvent(rv$workspace_modal_ready_nonce, {
+      if (isTRUE(dialog_mode) && identical(rv$workspace_modal_type, "phase1")) {
+        modal_metric <- rv$workspace_modal_metric %||% rv$current_metric
+        if (is.null(modal_metric) || identical(modal_metric, "")) return(invisible(NULL))
+        load_screening_results(modal_metric)
+      }
+    }, ignoreInit = TRUE)
+
+    output$artifact_status <- renderUI({
+      loading <- artifacts_loading()
+      error_text <- artifacts_error()
+
+      if (isTRUE(loading)) {
+        return(div(
+          class = "alert alert-info d-flex align-items-center gap-2",
+          icon("spinner", class = "fa-spin"),
+          tags$span("Loading full Phase 1 details. Summary results are available while plots and pairwise tables regenerate.")
+        ))
+      }
+
+      if (!is.null(error_text) && nzchar(error_text)) {
+        return(div(
+          class = "alert alert-danger d-flex justify-content-between align-items-center flex-wrap gap-2",
+          tags$span(paste0("Could not load full Phase 1 details: ", error_text)),
+          actionButton(
+            ns("retry_artifacts"),
+            "Retry details",
+            class = "btn btn-outline-danger btn-sm"
+          )
+        ))
+      }
+
+      NULL
+    })
+
+    observeEvent(input$retry_artifacts, {
+      refresh_screening_artifacts(rv$current_metric, defer = FALSE)
     }, ignoreInit = TRUE)
 
     observeEvent(input$run_screening, {

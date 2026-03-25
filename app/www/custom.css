@@ -557,6 +557,37 @@
   flex-shrink: 0;
 }
 
+.workspace-modal-loading-shell,
+.workspace-modal-error {
+  min-height: 150px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.workspace-modal-loading-progress {
+  height: 2.4rem;
+  background-color: #e5eff8;
+  border-radius: 0.4rem;
+  overflow: hidden;
+}
+
+.workspace-modal-loading-progress .progress-bar {
+  font-weight: 600;
+  padding: 0 0.9rem;
+  gap: 0.35rem;
+}
+
+.workspace-modal-loading-detail {
+  margin-top: 0.85rem;
+  color: #6c757d;
+  font-size: 0.9rem;
+}
+
+.workspace-startup-loading {
+  margin-bottom: 1rem;
+}
+
 .workspace-phase-body > .card:last-child {
   margin-bottom: 0;
 }

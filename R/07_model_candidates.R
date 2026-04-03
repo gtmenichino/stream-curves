@@ -31,6 +31,30 @@ resolve_dummy_names <- function(selected_names, data) {
   unique(resolved)
 }
 
+resolve_predictor_lookup <- function(allowed_preds, predictor_config, data) {
+  lookup <- tibble::tibble(
+    predictor_key = allowed_preds,
+    column_name = vapply(allowed_preds, function(pred_key) {
+      predictor_config[[pred_key]]$column_name %||% pred_key
+    }, character(1))
+  ) |>
+    dplyr::filter(.data$column_name %in% names(data))
+
+  lookup
+}
+
+map_columns_to_keys <- function(column_names, key_by_col) {
+  unique(vapply(column_names, function(col_name) {
+    key_by_col[[col_name]] %||% col_name
+  }, character(1), USE.NAMES = FALSE))
+}
+
+selected_terms_from_row <- function(row, model_data, key_by_col) {
+  selected_names <- names(row)[row]
+  resolved_columns <- resolve_dummy_names(selected_names, model_data)
+  map_columns_to_keys(resolved_columns, key_by_col)
+}
+
 #' Build model candidates for a single metric
 #'
 #' @param data Tibble with derived variables
@@ -38,9 +62,10 @@ resolve_dummy_names <- function(selected_names, data) {
 #' @param strat_decision One-row tibble from make_stratification_decisions()
 #' @param metric_config Parsed metric_registry.yaml
 #' @param predictor_config Parsed predictor_registry.yaml
+#' @param strat_config Parsed stratification_registry.yaml
 #' @return List with: candidates_df (tibble), importance_df (tibble), plots (list)
 build_model_candidates <- function(data, metric_key, strat_decision,
-                                    metric_config, predictor_config) {
+                                    metric_config, predictor_config, strat_config) {
 
   mc <- metric_config[[metric_key]]
   col_name <- mc$column_name
@@ -52,28 +77,31 @@ build_model_candidates <- function(data, metric_key, strat_decision,
     return(list(candidates_df = tibble::tibble(), importance_df = tibble::tibble(), plots = list()))
   }
 
-  ## Filter to columns that exist in data
-  available_preds <- allowed_preds[allowed_preds %in% names(data)]
+  pred_lookup <- resolve_predictor_lookup(allowed_preds, predictor_config, data)
+  available_pred_keys <- pred_lookup$predictor_key
+  available_pred_cols <- pred_lookup$column_name
+  key_by_col <- stats::setNames(pred_lookup$predictor_key, pred_lookup$column_name)
+
+  if (length(available_pred_cols) == 0) {
+    cli::cli_alert_warning("No available predictors found in the data for {metric_key}")
+    return(list(candidates_df = tibble::tibble(), importance_df = tibble::tibble(), plots = list()))
+  }
 
   ## ── Handle stratification mode ────────────────────────────────────────────
   strat_var <- NULL
   strat_mode <- mc$stratification_mode %||% "covariate"
 
   if (!is.null(strat_decision) && strat_decision$decision_type == "single") {
-    strat_var <- strat_decision$selected_strat
-
-    ## Get column name from strat_config (loaded in pipeline)
-    ## For now, assume strat_var IS the column name or maps to it
+    strat_key <- strat_decision$selected_strat
+    strat_var <- strat_config[[strat_key]]$column_name %||% strat_key
     if (!strat_var %in% names(data)) {
-      ## Try column_name lookup — but we don't have strat_config here
-      ## The pipeline should ensure the column exists
       cli::cli_alert_warning("Stratification variable {strat_var} not in data")
       strat_var <- NULL
     }
   }
 
   ## ── Prepare model data ────────────────────────────────────────────────────
-  model_cols <- c(col_name, available_preds)
+  model_cols <- c(col_name, available_pred_cols)
   if (!is.null(strat_var) && strat_mode == "covariate") {
     model_cols <- c(model_cols, strat_var)
   }
@@ -95,13 +123,13 @@ build_model_candidates <- function(data, metric_key, strat_decision,
   ## ── Count model pathway ───────────────────────────────────────────────────
   if (isTRUE(mc$count_model)) {
     return(build_count_model_candidates(
-      model_data, metric_key, col_name, available_preds, strat_var, mc
+      model_data, metric_key, col_name, available_pred_cols, strat_var, mc, key_by_col
     ))
   }
 
   ## ── Best subsets regression (OLS) ─────────────────────────────────────────
   ## Build formula for regsubsets (predictors only, no strat for now)
-  pred_formula <- paste(available_preds, collapse = " + ")
+  pred_formula <- paste(available_pred_cols, collapse = " + ")
   if (!is.null(strat_var) && strat_mode == "covariate") {
     pred_formula <- paste(strat_var, "+", pred_formula)
   }
@@ -113,7 +141,7 @@ build_model_candidates <- function(data, metric_key, strat_decision,
       full_formula,
       data = model_data,
       method = "exhaustive",
-      nvmax = length(available_preds) + if (!is.null(strat_var)) 1 else 0,
+      nvmax = length(available_pred_cols) + if (!is.null(strat_var)) 1 else 0,
       really.big = FALSE
     ),
     error = function(e) {
@@ -133,13 +161,11 @@ build_model_candidates <- function(data, metric_key, strat_decision,
     metric     = metric_key,
     model_id   = seq_along(s$bic),
     predictors = apply(s$which[, -1, drop = FALSE], 1, function(x) {
-      selected_names <- names(x)[x]
-      resolved <- resolve_dummy_names(selected_names, model_data)
-      paste(resolved, collapse = ", ")
+      terms <- selected_terms_from_row(x, model_data, key_by_col)
+      paste(terms, collapse = ", ")
     }),
     n_predictors = apply(s$which[, -1, drop = FALSE], 1, function(x) {
-      selected_names <- names(x)[x]
-      length(resolve_dummy_names(selected_names, model_data))
+      length(selected_terms_from_row(x, model_data, key_by_col))
     }),
     r_squared  = s$rsq,
     adj_r2     = s$adjr2,
@@ -158,24 +184,34 @@ build_model_candidates <- function(data, metric_key, strat_decision,
 
   ## ── Predictor importance ──────────────────────────────────────────────────
   top_mask <- candidates_df$delta_bic < 2
+  all_predictor_keys <- available_pred_keys
   if (sum(top_mask) > 0) {
     predictor_matrix <- s$which[, -1, drop = FALSE]
-    ## Reorder to match sorted candidates_df
     ord <- order(s$bic)
     predictor_matrix <- predictor_matrix[ord, , drop = FALSE]
-    top_predictors <- predictor_matrix[top_mask, , drop = FALSE]
-    importance <- colMeans(top_predictors)
-  } else {
-    importance <- rep(0, ncol(s$which) - 1)
-    names(importance) <- colnames(s$which)[-1]
-  }
+    selected_top_terms <- apply(predictor_matrix[top_mask, , drop = FALSE], 1, function(x) {
+      selected_terms_from_row(x, model_data, key_by_col)
+    })
 
-  importance_df <- tibble::tibble(
-    metric    = metric_key,
-    predictor = names(importance),
-    importance = as.numeric(importance)
-  ) |>
-    dplyr::arrange(dplyr::desc(importance))
+    if (!is.list(selected_top_terms)) {
+      selected_top_terms <- list(selected_top_terms)
+    }
+
+    importance_df <- tibble::tibble(
+      metric = metric_key,
+      predictor = all_predictor_keys,
+      importance = vapply(all_predictor_keys, function(pred_key) {
+        mean(vapply(selected_top_terms, function(sel) pred_key %in% sel, logical(1)))
+      }, numeric(1))
+    ) |>
+      dplyr::arrange(dplyr::desc(.data$importance))
+  } else {
+    importance_df <- tibble::tibble(
+      metric = metric_key,
+      predictor = all_predictor_keys,
+      importance = 0
+    )
+  }
 
   ## ── Plots ─────────────────────────────────────────────────────────────────
   plots <- list()
@@ -190,7 +226,7 @@ build_model_candidates <- function(data, metric_key, strat_decision,
       x = "Number of Predictors",
       y = "BIC"
     ) +
-    ggplot2::theme_minimal()
+    streamcurves_minimal_plot_theme()
 
   ## Adj R² vs number of predictors
   plots$adjr2_vs_npred <- ggplot2::ggplot(candidates_df, ggplot2::aes(x = n_predictors, y = adj_r2)) +
@@ -201,7 +237,7 @@ build_model_candidates <- function(data, metric_key, strat_decision,
       x = "Number of Predictors",
       y = "Adjusted R\u00b2"
     ) +
-    ggplot2::theme_minimal()
+    streamcurves_minimal_plot_theme()
 
   ## Model heatmap (top models)
   top_candidates <- candidates_df |> dplyr::filter(delta_bic < 2)
@@ -227,8 +263,10 @@ build_model_candidates <- function(data, metric_key, strat_decision,
         y = "Model",
         fill = "Included"
       ) +
-      ggplot2::theme_minimal() +
-      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+      streamcurves_minimal_plot_theme(
+        axis_text_x_angle = 45,
+        axis_text_x_hjust = 1
+      )
   }
 
   ## Predictor importance bar chart
@@ -245,7 +283,7 @@ build_model_candidates <- function(data, metric_key, strat_decision,
         x = "Predictor",
         y = "Inclusion Frequency (Top Models)"
       ) +
-      ggplot2::theme_minimal()
+      streamcurves_minimal_plot_theme()
   }
 
   list(
@@ -261,12 +299,13 @@ build_model_candidates <- function(data, metric_key, strat_decision,
 #' @param model_data Complete-cases tibble
 #' @param metric_key Metric key
 #' @param col_name Response column name
-#' @param available_preds Character vector of predictor names
+#' @param available_preds Character vector of predictor column names
 #' @param strat_var Stratification variable (or NULL)
 #' @param mc Metric config entry
+#' @param key_by_col Named vector mapping predictor columns to predictor keys
 #' @return List with candidates_df, importance_df, plots
 build_count_model_candidates <- function(model_data, metric_key, col_name,
-                                          available_preds, strat_var, mc) {
+                                          available_preds, strat_var, mc, key_by_col) {
 
   cli::cli_alert_info("{metric_key}: building count model candidates (Poisson/NB)")
 
@@ -307,17 +346,21 @@ build_count_model_candidates <- function(model_data, metric_key, col_name,
             error = function(e) NULL
           )
           if (!is.null(nb_fit)) {
+            predictor_keys <- map_columns_to_keys(combo, key_by_col)
+            term_labels <- unique(c(if (!is.null(strat_var)) strat_var else character(0), predictor_keys))
             model_list[[model_id]] <- list(
               model = nb_fit, family = "negbin",
-              predictors = paste(combo, collapse = ", "),
-              n_predictors = length(combo)
+              predictors = paste(term_labels, collapse = ", "),
+              n_predictors = length(term_labels)
             )
           }
         } else {
+          predictor_keys <- map_columns_to_keys(combo, key_by_col)
+          term_labels <- unique(c(if (!is.null(strat_var)) strat_var else character(0), predictor_keys))
           model_list[[model_id]] <- list(
             model = pois_fit, family = "poisson",
-            predictors = paste(combo, collapse = ", "),
-            n_predictors = length(combo)
+            predictors = paste(term_labels, collapse = ", "),
+            n_predictors = length(term_labels)
           )
         }
       }
@@ -377,7 +420,7 @@ build_count_model_candidates <- function(model_data, metric_key, col_name,
 #' @param predictor_config Parsed predictor_registry.yaml
 #' @return List with: all_candidates (tibble), all_importance (tibble), all_plots (list)
 run_all_model_building <- function(data, strat_decisions, metric_config,
-                                    predictor_config) {
+                                    predictor_config, strat_config) {
 
   cli::cli_alert_info("Building model candidates for all metrics...")
 
@@ -402,7 +445,7 @@ run_all_model_building <- function(data, strat_decisions, metric_config,
   results_list <- map_fn(eligible, function(metric_key) {
     strat_dec <- strat_decisions |> dplyr::filter(metric == metric_key)
     if (nrow(strat_dec) == 0) strat_dec <- NULL else strat_dec <- strat_dec[1, ]
-    build_model_candidates(data, metric_key, strat_dec, metric_config, predictor_config)
+    build_model_candidates(data, metric_key, strat_dec, metric_config, predictor_config, strat_config)
   })
 
   ## Combine

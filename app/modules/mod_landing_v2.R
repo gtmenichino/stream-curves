@@ -99,7 +99,7 @@ mod_landing_v2_ui <- function(id) {
                      and interpretability before confirming a stratification."),
             tags$li("Use ", tags$strong("Phase 4"), " to review descriptive statistics and
                      finalize the scoring curve."),
-            tags$li("Use ", tags$strong("Summary / Export"), " from the Reference Curves toolbar
+            tags$li("Use ", tags$strong("Export"), " from the Reference Curves toolbar
                      to download results and generate reports.")
           ),
           tags$hr(),

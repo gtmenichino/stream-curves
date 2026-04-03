@@ -7,17 +7,17 @@ library(readr)
 
 #' Run the full StreamCurves analysis pipeline
 #'
+#' @param input_path Path to the input .xlsx workbook
 #' @param config_dir Path to config directory (default "config")
 #' @param data_dir Path to data directory (default "data")
-#' @param csv_path Path to the input CSV data file
 #' @param output_dir Path to outputs directory (default "outputs")
 #' @param metrics Character vector of metric keys to process (NULL = all)
 #' @param seed Random seed (default 42)
 #' @param n_cores Number of parallel workers (default: all cores minus 1)
 #' @return invisible(run_dir) — path to the timestamped output directory
-run_pipeline <- function(config_dir = "config",
+run_pipeline <- function(input_path = NULL,
+                         config_dir = "config",
                          data_dir   = "data",
-                         csv_path   = NULL,
                          output_dir = "outputs",
                          metrics    = NULL,
                          seed       = 42,
@@ -26,23 +26,23 @@ run_pipeline <- function(config_dir = "config",
   pipeline_start <- Sys.time()
   set.seed(seed)
 
-  if (is.null(csv_path) || !nzchar(csv_path)) {
+  if (is.null(input_path) || !nzchar(input_path)) {
     stop(
-      "csv_path is required. Provide the path to your input CSV when calling run_pipeline().",
+      "input_path is required. Provide the path to your input .xlsx workbook when calling run_pipeline().",
       call. = FALSE
     )
   }
 
-  if (tolower(tools::file_ext(csv_path)) != "csv") {
+  if (tolower(tools::file_ext(input_path)) != "xlsx") {
     stop(
-      "run_pipeline() currently supports CSV input only. Provide a .csv file path.",
+      "run_pipeline() requires an .xlsx workbook input.",
       call. = FALSE
     )
   }
 
-  if (!file.exists(csv_path)) {
+  if (!file.exists(input_path)) {
     stop(
-      paste0("Input CSV not found: ", csv_path),
+      paste0("Input workbook not found: ", input_path),
       call. = FALSE
     )
   }
@@ -77,28 +77,17 @@ run_pipeline <- function(config_dir = "config",
   cli::cli_alert_info("Run ID: {run_id}")
   cli::cli_alert_info("Output: {run_dir}")
 
-  ## ── Load configs ──────────────────────────────────────────────────────────
-  cli::cli_h2("Loading configuration")
-
-  metric_config    <- yaml::read_yaml(file.path(config_dir, "metric_registry.yaml"))
-  strat_config     <- yaml::read_yaml(file.path(config_dir, "stratification_registry.yaml"))
-  predictor_config <- yaml::read_yaml(file.path(config_dir, "predictor_registry.yaml"))
-  factor_recode_config <- yaml::read_yaml(file.path(config_dir, "factor_recode_registry.yaml"))
-  output_config    <- yaml::read_yaml(file.path(config_dir, "output_registry.yaml"))
-
-  cli::cli_alert_success("Loaded 5 config files")
-
-  ## Filter metrics if specified
-  if (!is.null(metrics)) {
-    metric_config <- metric_config[names(metric_config) %in% metrics]
-    cli::cli_alert_info("Filtered to {length(metric_config)} metrics: {paste(names(metric_config), collapse = ', ')}")
-  }
+  ## ── Load output config ────────────────────────────────────────────────────
+  cli::cli_h2("Loading output configuration")
+  output_config <- yaml::read_yaml(file.path(config_dir, "output_registry.yaml"))
+  cli::cli_alert_success("Loaded output_registry.yaml")
 
   ## ── Source analysis modules ───────────────────────────────────────────────
   cli::cli_h2("Loading analysis modules")
 
   module_files <- c(
     "R/00_manifest.R",
+    "R/00_input_workbook.R",
     "R/01_load_data.R",
     "R/02_clean_data.R",
     "R/03_derive_variables.R",
@@ -142,32 +131,41 @@ run_pipeline <- function(config_dir = "config",
     ))
   }
 
-  ## ── Step 1: Load data ─────────────────────────────────────────────────────
-  cli::cli_h2("Step 1/12: Loading data")
+  ## ── Step 1: Load workbook ─────────────────────────────────────────────────
+  cli::cli_h2("Step 1/12: Loading workbook")
   t0 <- Sys.time()
 
-  raw_data <- tryCatch({
-    load_data(
-      csv_path = csv_path
-    )
+  input_bundle <- tryCatch({
+    load_data(input_path)
   }, error = function(e) {
-    cli::cli_alert_danger("Data loading failed: {e$message}")
-    log_step("load_data", status = "error", msg = e$message)
+    cli::cli_alert_danger("Workbook loading failed: {e$message}")
+    log_step("load_workbook", status = "error", msg = e$message)
     return(NULL)
   })
 
-  if (is.null(raw_data)) {
-    cli::cli_alert_danger("Pipeline aborted: data loading failed")
+  if (is.null(input_bundle)) {
+    cli::cli_alert_danger("Pipeline aborted: workbook loading failed")
     return(invisible(NULL))
   }
-  log_step("load_data", time_sec = as.numeric(difftime(Sys.time(), t0, units = "secs")))
+  log_step("load_workbook", time_sec = as.numeric(difftime(Sys.time(), t0, units = "secs")))
+
+  raw_data <- input_bundle$raw_data
+  metric_config <- input_bundle$metric_config
+  strat_config <- input_bundle$strat_config
+  predictor_config <- input_bundle$predictor_config
+  factor_recode_config <- input_bundle$factor_recode_config
+
+  if (!is.null(metrics)) {
+    metric_config <- metric_config[names(metric_config) %in% metrics]
+    cli::cli_alert_info("Filtered to {length(metric_config)} metrics: {paste(names(metric_config), collapse = ', ')}")
+  }
 
   ## ── Step 2: Clean data ────────────────────────────────────────────────────
   cli::cli_h2("Step 2/12: Cleaning data")
   t0 <- Sys.time()
 
   clean_result <- tryCatch(
-    clean_data(raw_data, metric_config, strat_config),
+    clean_data(raw_data, metric_config, strat_config, factor_recode_config),
     error = function(e) {
       cli::cli_alert_danger("Data cleaning failed: {e$message}")
       log_step("clean_data", status = "error", msg = e$message)
@@ -189,7 +187,7 @@ run_pipeline <- function(config_dir = "config",
   t0 <- Sys.time()
 
   data <- tryCatch(
-    derive_variables(data, factor_recode_config, predictor_config),
+    derive_variables(data, factor_recode_config, predictor_config, strat_config),
     error = function(e) {
       cli::cli_alert_danger("Variable derivation failed: {e$message}")
       log_step("derive_variables", status = "error", msg = e$message)
@@ -281,7 +279,7 @@ run_pipeline <- function(config_dir = "config",
   t0 <- Sys.time()
 
   model_results <- tryCatch(
-    run_all_model_building(data, strat_decisions, metric_config, predictor_config),
+    run_all_model_building(data, strat_decisions, metric_config, predictor_config, strat_config),
     error = function(e) {
       cli::cli_alert_danger("Model building failed: {e$message}")
       log_step("model_building", status = "error", msg = e$message)
@@ -478,8 +476,8 @@ run_pipeline <- function(config_dir = "config",
   ## ── Manifest ──────────────────────────────────────────────────────────────
   if (exists("create_run_manifest", mode = "function")) {
     cli::cli_h2("Creating run manifest")
-    manifest <- create_run_manifest(run_dir, config_dir, data_dir)
-    save_manifest(manifest, run_dir)
+    manifest <- create_run_manifest(run_dir, config_dir, data_dir, input_path = input_path)
+    save_manifest(manifest, run_dir, config_dir = config_dir, input_path = input_path)
   }
 
   ## ── Save pipeline log ─────────────────────────────────────────────────────

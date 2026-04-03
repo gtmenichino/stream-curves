@@ -5,6 +5,13 @@ library(dplyr)
 library(purrr)
 library(tibble)
 
+ANALYSIS_STEP_LABELS <- c(
+  "Exploratory",
+  "Cross-Metric Analysis",
+  "Verification",
+  "Reference Curves"
+)
+
 eligible_summary_metrics <- function(metric_config) {
   keys <- names(metric_config)
   keys[vapply(keys, function(mk) {
@@ -52,6 +59,77 @@ get_metric_allowed_strats <- function(rv, metric) {
   allowed[allowed %in% names(rv$strat_config)]
 }
 
+normalize_curve_stratification_value <- function(rv, metric, selected) {
+  if (is.null(selected) || is.na(selected) || identical(selected, "") || identical(selected, "none")) {
+    return("none")
+  }
+
+  allowed <- get_metric_allowed_strats(rv, metric)
+  if (selected %in% allowed) {
+    return(selected)
+  }
+
+  "none"
+}
+
+get_metric_curve_strat_recommendation <- function(rv, metric) {
+  candidates <- get_metric_phase1_candidate_table(rv, metric, include_all_allowed = TRUE)
+  if (is.null(candidates) || nrow(candidates) == 0) {
+    return("none")
+  }
+
+  ranked <- candidates |>
+    dplyr::filter(candidate_status %in% c("promising", "possible")) |>
+    dplyr::arrange(match(candidate_status, c("promising", "possible")), p_value, stratification)
+
+  if (nrow(ranked) == 0) {
+    return("none")
+  }
+
+  normalize_curve_stratification_value(rv, metric, ranked$stratification[1])
+}
+
+get_metric_curve_stratification <- function(rv, metric, fallback_to_auto = TRUE) {
+  stored <- rv$curve_stratification[[metric]] %||% NULL
+  normalized <- normalize_curve_stratification_value(rv, metric, stored)
+
+  if (!is.null(stored) || !isTRUE(fallback_to_auto)) {
+    return(normalized)
+  }
+
+  get_metric_curve_strat_recommendation(rv, metric)
+}
+
+get_metric_curve_strat_choices <- function(rv, metric) {
+  allowed <- get_metric_allowed_strats(rv, metric)
+  stats::setNames(
+    c("none", allowed),
+    c("None", vapply(allowed, function(sk) get_strat_display_name(rv, sk), character(1)))
+  )
+}
+
+set_metric_curve_stratification <- function(rv, metric, selected, clear_phase4 = TRUE) {
+  old_value <- get_metric_curve_stratification(rv, metric, fallback_to_auto = FALSE)
+  normalized <- normalize_curve_stratification_value(rv, metric, selected)
+
+  rv$curve_stratification[[metric]] <- normalized
+  sync_metric_decision_state(rv, metric, build_metric_strat_decision(rv, metric, normalized))
+
+  if (isTRUE(clear_phase4) && !identical(old_value, normalized)) {
+    clear_metric_phase4_results(rv, metric)
+  }
+
+  invisible(normalized)
+}
+
+get_metric_curve_strat_label <- function(rv, metric, selected = get_metric_curve_stratification(rv, metric)) {
+  if (is.null(selected) || identical(selected, "none")) {
+    return("None")
+  }
+
+  get_strat_display_name(rv, selected)
+}
+
 get_summary_available_choices <- function(rv) {
   keys <- names(rv$strat_config)
   if (length(keys) == 0) return(character(0))
@@ -81,12 +159,7 @@ format_strat_list <- function(rv, strat_keys) {
 }
 
 empty_summary_note_store <- function() {
-  list(
-    "Phase 1" = list(),
-    "Phase 2" = list(),
-    "Phase 3" = list(),
-    "Phase 4" = list()
-  )
+  stats::setNames(replicate(length(ANALYSIS_STEP_LABELS), list(), simplify = FALSE), ANALYSIS_STEP_LABELS)
 }
 
 normalize_summary_note_items <- function(items) {
@@ -152,9 +225,6 @@ get_global_phase2_passed <- function(rv, metric = NULL) {
 
 get_metric_phase2_passed <- function(rv, metric) {
   allowed <- get_metric_allowed_strats(rv, metric)
-  if (metric %in% names(rv$phase2_metric_overrides)) {
-    return(intersect(allowed, rv$phase2_metric_overrides[[metric]] %||% character(0)))
-  }
   intersect(allowed, get_global_phase2_passed(rv, metric))
 }
 
@@ -276,9 +346,14 @@ build_phase2_ranking <- function(result, phase1_cands, support_threshold) {
     )
 }
 
-recompute_phase2_shared <- function(rv, settings = rv$phase2_settings %||% empty_phase2_settings()) {
-  settings <- normalize_phase2_settings(rv, settings)
-  rv$phase2_settings <- settings
+recompute_phase2_shared <- function(rv,
+                                    settings = rv$phase2_settings %||% empty_phase2_settings(),
+                                    persist_settings = TRUE) {
+  settings <- if (isTRUE(persist_settings)) {
+    set_phase2_settings(rv, settings)
+  } else {
+    normalize_phase2_settings(rv, settings)
+  }
 
   if (length(settings$metric_filter) < 2 || length(settings$strat_filter) == 0) {
     rv$cross_metric_consistency <- NULL
@@ -319,6 +394,31 @@ recompute_phase2_shared <- function(rv, settings = rv$phase2_settings %||% empty
   rv$cross_metric_consistency <- result
   rv$phase2_ranking <- ranking
   invisible(list(result = result, ranking = ranking, settings = settings))
+}
+
+refresh_phase2_ranking_shared <- function(rv,
+                                          settings = rv$phase2_settings %||% empty_phase2_settings(),
+                                          persist_settings = TRUE) {
+  settings <- if (isTRUE(persist_settings)) {
+    set_phase2_settings(rv, settings)
+  } else {
+    normalize_phase2_settings(rv, settings)
+  }
+  result <- rv$cross_metric_consistency %||% NULL
+
+  if (is.null(result) || is.null(result$summary) || !is.data.frame(result$summary) ||
+      nrow(result$summary) == 0) {
+    rv$phase2_ranking <- NULL
+    return(invisible(NULL))
+  }
+
+  rv$phase2_ranking <- build_phase2_ranking(
+    result,
+    rv$phase1_candidates,
+    settings$support_threshold
+  )
+
+  invisible(list(result = result, ranking = rv$phase2_ranking, settings = settings))
 }
 
 auto_phase1_candidate_status <- function(p_val, es_label) {
@@ -370,8 +470,7 @@ build_metric_phase1_candidate_table_from_sources <- function(metric, allowed,
     p_val <- get_first_value(existing_row, "p_value", get_first_value(p_row, "p_value", NA_real_))
     es_label <- get_first_value(existing_row, "effect_size_label",
                                 get_first_value(es_row, "effect_size_label", "negligible"))
-    status <- get_first_value(existing_row, "candidate_status",
-                              auto_phase1_candidate_status(p_val, es_label))
+    status <- auto_phase1_candidate_status(p_val, es_label)
 
     tibble::tibble(
       metric = metric,
@@ -383,7 +482,7 @@ build_metric_phase1_candidate_table_from_sources <- function(metric, allowed,
       min_group_n = get_first_value(existing_row, "min_group_n",
                                     get_first_value(p_row, "min_group_n", NA_integer_)),
       candidate_status = status,
-      reviewer_note = get_first_value(existing_row, "reviewer_note", "")
+      reviewer_note = ""
     )
   })
 }
@@ -458,6 +557,11 @@ get_metric_phase3_choices <- function(rv, metric) {
 }
 
 get_metric_phase3_selected <- function(rv, metric) {
+  curve_choice <- get_metric_curve_stratification(rv, metric)
+  if (!is.null(curve_choice) && nzchar(curve_choice)) {
+    return(curve_choice)
+  }
+
   verified <- rv$phase3_verification[[metric]]
   if (!is.null(verified) && !is.null(verified$selected_strat)) {
     return(verified$selected_strat)
@@ -542,21 +646,29 @@ build_metric_strat_decision <- function(rv, metric, selected_strat) {
 }
 
 sync_metric_decision_state <- function(rv, metric, decision_tbl) {
-  if (identical(rv$current_metric, metric)) {
+  ensure_metric_phase_cache(rv, metric)
+
+  if (identical(rv$current_metric, metric) &&
+      !identical(rv$strat_decision_user %||% NULL, decision_tbl %||% NULL)) {
     rv$strat_decision_user <- decision_tbl
   }
 
-  if (is.null(rv$metric_phase_cache[[metric]])) {
-    rv$metric_phase_cache[[metric]] <- list()
+  if (!identical(rv$metric_phase_cache[[metric]]$strat_decision_user %||% NULL,
+                 decision_tbl %||% NULL)) {
+    rv$metric_phase_cache[[metric]]$strat_decision_user <- decision_tbl
   }
-  rv$metric_phase_cache[[metric]]$strat_decision_user <- decision_tbl
   invisible(NULL)
 }
 
 set_metric_phase3_selected <- function(rv, metric, selected_strat) {
   choices <- get_metric_phase3_choices(rv, metric)
-  normalized <- if (is.null(selected_strat) || is.na(selected_strat) || selected_strat == "" ||
-                    !(selected_strat %in% choices)) "none" else selected_strat
+  normalized <- if (is.null(selected_strat) || is.na(selected_strat) || selected_strat == "") {
+    "none"
+  } else if (selected_strat %in% c("none", choices, get_metric_allowed_strats(rv, metric))) {
+    normalize_curve_stratification_value(rv, metric, selected_strat)
+  } else {
+    "none"
+  }
 
   existing <- rv$phase3_verification[[metric]]
   rv$phase3_verification[[metric]] <- list(
@@ -569,7 +681,7 @@ set_metric_phase3_selected <- function(rv, metric, selected_strat) {
     justification = existing$justification %||% "Updated from Summary page"
   )
 
-  sync_metric_decision_state(rv, metric, build_metric_strat_decision(rv, metric, normalized))
+  set_metric_curve_stratification(rv, metric, normalized, clear_phase4 = FALSE)
   invisible(normalized)
 }
 
@@ -591,6 +703,8 @@ clear_metric_phase4_results <- function(rv, metric) {
   rv$metric_phase_cache[[metric]]$phase4_data <- NULL
   rv$metric_phase_cache[[metric]]$stratum_results <- NULL
   rv$metric_phase_cache[[metric]]$phase4_signature <- NULL
+  rv$metric_phase_cache[[metric]]$phase4_artifact_mode <- NULL
+  rv$metric_phase_cache[[metric]]$phase4_curve_rows <- NULL
   invisible(NULL)
 }
 
@@ -613,7 +727,7 @@ get_metric_phase4_decision_state <- function(rv, metric) {
     return(cached)
   }
 
-  build_metric_strat_decision(rv, metric, get_metric_phase3_selected(rv, metric))
+  build_metric_strat_decision(rv, metric, get_metric_curve_stratification(rv, metric))
 }
 
 build_metric_phase4_signature <- function(rv, metric, decision_tbl = get_metric_phase4_decision_state(rv, metric)) {
@@ -644,17 +758,127 @@ phase4_signature_matches <- function(lhs, rhs) {
   identical(lhs %||% NULL, rhs %||% NULL)
 }
 
+phase4_artifact_mode_satisfies <- function(entry_mode = NULL, artifact_mode = c("summary", "full")) {
+  artifact_mode <- match.arg(artifact_mode)
+  resolved_mode <- entry_mode %||% "full"
+
+  if (identical(artifact_mode, "summary")) {
+    return(resolved_mode %in% c("summary", "full"))
+  }
+
+  identical(resolved_mode, "full")
+}
+
+get_metric_phase4_artifact_mode <- function(rv, metric) {
+  cached <- rv$metric_phase_cache[[metric]]$phase4_artifact_mode %||% NULL
+  completed <- rv$completed_metrics[[metric]]$phase4_artifact_mode %||% NULL
+  cached %||% completed
+}
+
 get_metric_phase4_cached_result <- function(rv, metric) {
   cache_entry <- rv$metric_phase_cache[[metric]] %||% list()
   completed_entry <- rv$completed_metrics[[metric]] %||% list()
 
   stratum_results <- cache_entry$stratum_results %||% completed_entry$stratum_results %||% NULL
   reference_curve <- cache_entry$reference_curve %||% completed_entry$reference_curve %||% NULL
+  curve_rows <- cache_entry$phase4_curve_rows %||% completed_entry$phase4_curve_rows %||% NULL
 
   list(
     signature = cache_entry$phase4_signature %||% completed_entry$phase4_signature %||% NULL,
+    artifact_mode = cache_entry$phase4_artifact_mode %||% completed_entry$phase4_artifact_mode %||% NULL,
     reference_curve = reference_curve,
-    stratum_results = stratum_results
+    stratum_results = stratum_results,
+    curve_rows = curve_rows
+  )
+}
+
+extract_metric_phase4_curve_rows <- function(entry) {
+  if (is.null(entry) || identical(entry$type, "regional")) {
+    return(tibble::tibble())
+  }
+
+  stored_curve_rows <- entry$curve_rows %||% entry$phase4_curve_rows %||% NULL
+  if (!is.null(stored_curve_rows)) {
+    return(tibble::as_tibble(stored_curve_rows))
+  }
+
+  if (!is.null(entry$stratum_results)) {
+    rows <- purrr::imap_dfr(entry$stratum_results, function(x, lvl) {
+      result <- normalize_reference_curve_result(x$reference_curve %||% x, stratum_label = lvl)
+      if (!is.null(result) && !is.null(result$curve_row)) {
+        result$curve_row
+      } else {
+        NULL
+      }
+    })
+    return(rows)
+  }
+
+  if (!is.null(entry$reference_curve) && !is.null(entry$reference_curve$curve_row)) {
+    normalized <- normalize_reference_curve_result(entry$reference_curve)
+    return(normalized$curve_row %||% tibble::tibble())
+  }
+
+  tibble::tibble()
+}
+
+update_metric_phase4_completed_entry <- function(rv, metric, phase4_fields) {
+  existing <- rv$completed_metrics[[metric]] %||% list()
+  rv$completed_metrics[[metric]] <- utils::modifyList(existing, phase4_fields, keep.null = TRUE)
+  invisible(rv$completed_metrics[[metric]])
+}
+
+metric_phase4_entry_is_current <- function(entry, expected_signature) {
+  if (is.null(entry) || identical(entry$type, "regional")) {
+    return(FALSE)
+  }
+
+  entry_signature <- entry$phase4_signature %||% NULL
+  if (is.null(entry_signature) || !phase4_signature_matches(entry_signature, expected_signature)) {
+    return(FALSE)
+  }
+
+  nrow(extract_metric_phase4_curve_rows(entry)) > 0
+}
+
+get_metric_phase4_display_state <- function(rv, metric,
+                                            decision_tbl = get_metric_phase4_decision_state(rv, metric)) {
+  expected_signature <- build_metric_phase4_signature(rv, metric, decision_tbl)
+
+  cache_entry <- rv$metric_phase_cache[[metric]] %||% list()
+  cache_entry$strat_decision <- cache_entry$strat_decision_user %||% decision_tbl
+
+  completed_entry <- rv$completed_metrics[[metric]] %||% list()
+
+  if (metric_phase4_entry_is_current(cache_entry, expected_signature)) {
+    return(list(
+      source = "cache",
+      artifact_mode = cache_entry$phase4_artifact_mode %||% "full",
+      reference_curve = cache_entry$reference_curve %||% NULL,
+      stratum_results = cache_entry$stratum_results %||% NULL,
+      strat_decision = cache_entry$strat_decision %||% decision_tbl,
+      curve_rows = extract_metric_phase4_curve_rows(cache_entry)
+    ))
+  }
+
+  if (metric_phase4_entry_is_current(completed_entry, expected_signature)) {
+    return(list(
+      source = "completed",
+      artifact_mode = completed_entry$phase4_artifact_mode %||% "full",
+      reference_curve = completed_entry$reference_curve %||% NULL,
+      stratum_results = completed_entry$stratum_results %||% NULL,
+      strat_decision = completed_entry$strat_decision %||% decision_tbl,
+      curve_rows = extract_metric_phase4_curve_rows(completed_entry)
+    ))
+  }
+
+  list(
+    source = "none",
+    artifact_mode = NULL,
+    reference_curve = NULL,
+    stratum_results = NULL,
+    strat_decision = decision_tbl,
+    curve_rows = tibble::tibble()
   )
 }
 
@@ -663,11 +887,18 @@ metric_has_any_phase4_results <- function(rv, metric) {
   !is.null(cached$reference_curve) || !is.null(cached$stratum_results)
 }
 
-metric_has_phase4_cache <- function(rv, metric, decision_tbl = get_metric_phase4_decision_state(rv, metric)) {
+metric_has_phase4_cache <- function(rv, metric,
+                                    decision_tbl = get_metric_phase4_decision_state(rv, metric),
+                                    artifact_mode = c("full", "summary")) {
+  artifact_mode <- match.arg(artifact_mode)
   cached <- get_metric_phase4_cached_result(rv, metric)
   expected_signature <- build_metric_phase4_signature(rv, metric, decision_tbl)
 
   if (is.null(cached$signature) || !phase4_signature_matches(cached$signature, expected_signature)) {
+    return(FALSE)
+  }
+
+  if (!phase4_artifact_mode_satisfies(cached$artifact_mode, artifact_mode)) {
     return(FALSE)
   }
 
@@ -683,13 +914,29 @@ metric_has_phase4_cache <- function(rv, metric, decision_tbl = get_metric_phase4
   !is.null(cached$reference_curve) && !is.null(cached$reference_curve$curve_row)
 }
 
+metric_needs_phase4_artifact_refresh <- function(rv, metric,
+                                                 artifact_mode = c("full", "summary")) {
+  artifact_mode <- match.arg(artifact_mode)
+  !metric_has_phase4_cache(
+    rv,
+    metric,
+    artifact_mode = artifact_mode
+  )
+}
+
 cache_metric_phase4_results <- function(rv, metric,
                                         decision_tbl = get_metric_phase4_decision_state(rv, metric),
                                         reference_curve = NULL,
-                                        stratum_results = NULL) {
+                                        stratum_results = NULL,
+                                        artifact_mode = c("full", "summary")) {
+  artifact_mode <- match.arg(artifact_mode)
   ensure_metric_phase_cache(rv, metric)
 
   signature <- build_metric_phase4_signature(rv, metric, decision_tbl)
+  curve_rows <- extract_metric_phase4_curve_rows(list(
+    reference_curve = reference_curve,
+    stratum_results = stratum_results
+  ))
 
   rv$metric_phase_cache[[metric]]$strat_decision_user <- decision_tbl
   rv$metric_phase_cache[[metric]]$reference_curve <- reference_curve
@@ -697,6 +944,8 @@ cache_metric_phase4_results <- function(rv, metric,
   rv$metric_phase_cache[[metric]]$phase4_data <- rv$data
   rv$metric_phase_cache[[metric]]$stratum_results <- stratum_results
   rv$metric_phase_cache[[metric]]$phase4_signature <- signature
+  rv$metric_phase_cache[[metric]]$phase4_artifact_mode <- artifact_mode
+  rv$metric_phase_cache[[metric]]$phase4_curve_rows <- curve_rows
 
   rv$stratum_results[[metric]] <- stratum_results
 
@@ -723,9 +972,10 @@ advance_modal_progress <- function(progress, detail = NULL) {
   invisible(NULL)
 }
 
-count_metric_phase4_preload_steps <- function(rv, metric) {
+count_metric_phase4_preload_steps <- function(rv, metric, artifact_mode = c("full", "summary")) {
+  artifact_mode <- match.arg(artifact_mode)
   decision_tbl <- get_metric_phase4_decision_state(rv, metric)
-  if (metric_has_phase4_cache(rv, metric, decision_tbl)) {
+  if (metric_has_phase4_cache(rv, metric, decision_tbl, artifact_mode = artifact_mode)) {
     return(0L)
   }
 
@@ -741,16 +991,56 @@ count_metric_phase4_preload_steps <- function(rv, metric) {
   2L
 }
 
-preload_metric_phase4_workspace <- function(rv, metric, progress = NULL) {
+preload_metric_phase4_workspace <- function(rv, metric, progress = NULL,
+                                            artifact_mode = c("full", "summary")) {
+  artifact_mode <- match.arg(artifact_mode)
   decision_tbl <- get_metric_phase4_decision_state(rv, metric)
   sync_metric_decision_state(rv, metric, decision_tbl)
   rv$phase4_data <- rv$data
   rv$current_stratum_level <- NULL
+  expected_signature <- build_metric_phase4_signature(rv, metric, decision_tbl)
+  cached <- get_metric_phase4_cached_result(rv, metric)
 
-  if (metric_has_phase4_cache(rv, metric, decision_tbl)) {
-    cached <- get_metric_phase4_cached_result(rv, metric)
-    if (!is.null(cached$reference_curve)) {
-      rv$reference_curve <- cached$reference_curve
+  if (!is.null(cached$signature) &&
+      phase4_signature_matches(cached$signature, expected_signature) &&
+      phase4_artifact_mode_satisfies(cached$artifact_mode, artifact_mode) &&
+      nrow(extract_metric_phase4_curve_rows(cached)) > 0) {
+    if (!is.null(cached$stratum_results)) {
+      hydrated_strata <- purrr::imap(cached$stratum_results, function(entry, lvl) {
+        list(reference_curve = hydrate_reference_curve_result(
+          entry$reference_curve %||% entry,
+          rv$data,
+          metric,
+          rv$metric_config,
+          stratum_label = lvl,
+          artifact_mode = artifact_mode
+        ))
+      })
+
+      cache_metric_phase4_results(
+        rv,
+        metric,
+        decision_tbl = decision_tbl,
+        stratum_results = hydrated_strata,
+        artifact_mode = artifact_mode
+      )
+      rv$reference_curve <- NULL
+    } else if (!is.null(cached$reference_curve)) {
+      hydrated_curve <- hydrate_reference_curve_result(
+        cached$reference_curve,
+        rv$data,
+        metric,
+        rv$metric_config,
+        artifact_mode = artifact_mode
+      )
+      rv$reference_curve <- hydrated_curve
+      cache_metric_phase4_results(
+        rv,
+        metric,
+        decision_tbl = decision_tbl,
+        reference_curve = hydrated_curve,
+        artifact_mode = artifact_mode
+      )
     } else {
       rv$reference_curve <- NULL
     }
@@ -769,7 +1059,13 @@ preload_metric_phase4_workspace <- function(rv, metric, progress = NULL) {
     if (length(levels) == 0) {
       set_modal_progress_detail(progress, "No strata available for curve generation.")
       advance_modal_progress(progress, "No strata available for curve generation.")
-      cache_metric_phase4_results(rv, metric, decision_tbl = decision_tbl, stratum_results = list())
+      cache_metric_phase4_results(
+        rv,
+        metric,
+        decision_tbl = decision_tbl,
+        stratum_results = list(),
+        artifact_mode = artifact_mode
+      )
       advance_modal_progress(progress, "Prepared Phase 4 workspace.")
       return(invisible(TRUE))
     }
@@ -783,7 +1079,8 @@ preload_metric_phase4_workspace <- function(rv, metric, progress = NULL) {
           stratum_data,
           metric,
           rv$metric_config,
-          stratum_label = lvl
+          stratum_label = lvl,
+          build_plots = identical(artifact_mode, "full")
         )
       )
       advance_modal_progress(
@@ -797,14 +1094,20 @@ preload_metric_phase4_workspace <- function(rv, metric, progress = NULL) {
       rv,
       metric,
       decision_tbl = decision_tbl,
-      stratum_results = stratum_results
+      stratum_results = stratum_results,
+      artifact_mode = artifact_mode
     )
     advance_modal_progress(progress, "Prepared Phase 4 workspace.")
     return(invisible(TRUE))
   }
 
   set_modal_progress_detail(progress, "Building reference curve...")
-  curve_result <- build_reference_curve(rv$data, metric, rv$metric_config)
+  curve_result <- build_reference_curve(
+    rv$data,
+    metric,
+    rv$metric_config,
+    build_plots = identical(artifact_mode, "full")
+  )
   advance_modal_progress(progress, "Built reference curve.")
 
   set_modal_progress_detail(progress, "Caching Phase 4 results...")
@@ -812,7 +1115,8 @@ preload_metric_phase4_workspace <- function(rv, metric, progress = NULL) {
     rv,
     metric,
     decision_tbl = decision_tbl,
-    reference_curve = curve_result
+    reference_curve = curve_result,
+    artifact_mode = artifact_mode
   )
   advance_modal_progress(progress, "Prepared Phase 4 workspace.")
   invisible(TRUE)
@@ -860,6 +1164,7 @@ get_metric_phase1_display_state <- function(rv, metric) {
     results = screening$results %||% tibble::tibble(),
     pairwise = screening$pairwise %||% tibble::tibble(),
     plots = screening$plots %||% list(),
+    plot_specs = screening$plot_specs %||% list(),
     effect_sizes = effect_sizes %||% tibble::tibble()
   )
 }
@@ -921,6 +1226,8 @@ build_metric_phase1_backfill <- function(rv, metric, mode = c("full", "summary")
   } else {
     list()
   }
+  plot_specs <- setNames(lapply(results_list, `[[`, "plot_spec"), names(results_list))
+  plot_specs <- Filter(Negate(is.null), plot_specs)
 
   tested_strats <- unique(result_rows$stratification %||% character(0))
   set_modal_progress_detail(progress, "Computing effect sizes and candidate defaults...")
@@ -948,7 +1255,8 @@ build_metric_phase1_backfill <- function(rv, metric, mode = c("full", "summary")
     screening = list(
       results = result_rows,
       pairwise = pairwise_rows,
-      plots = plots
+      plots = plots,
+      plot_specs = plot_specs
     ),
     effect_sizes = effect_sizes,
     candidates = candidates,
@@ -1048,8 +1356,7 @@ build_metric_phase3_backfill <- function(rv, metric, mode = c("full", "summary")
   mode <- match.arg(mode)
   finalists <- get_metric_phase3_choices(rv, metric)
   existing <- rv$phase3_verification[[metric]]
-  selected <- get_metric_phase3_selected(rv, metric)
-  normalized_selected <- if (selected %in% finalists) selected else "none"
+  normalized_selected <- get_metric_curve_stratification(rv, metric)
 
   verification_status <- existing$verification_status %||% list()
   if (length(finalists) > 0) {
@@ -1170,13 +1477,17 @@ ensure_metric_phase3_artifacts <- function(rv, metric, progress = NULL) {
 }
 
 ensure_metric_phase3_valid <- function(rv, metric) {
-  current_choice <- get_metric_phase3_selected(rv, metric)
-  valid_choices <- get_metric_phase3_choices(rv, metric)
-  if (identical(current_choice, "none") || current_choice %in% valid_choices) {
+  stored_choice <- rv$curve_stratification[[metric]] %||% NULL
+  if (is.null(stored_choice) || identical(stored_choice, "none")) {
     return(invisible(FALSE))
   }
 
-  set_metric_phase3_selected(rv, metric, "none")
+  if (stored_choice %in% get_metric_allowed_strats(rv, metric)) {
+    return(invisible(FALSE))
+  }
+
+  rv$curve_stratification[[metric]] <- NULL
+  sync_metric_decision_state(rv, metric, build_metric_strat_decision(rv, metric, "none"))
   clear_metric_phase4_results(rv, metric)
   invisible(TRUE)
 }
@@ -1187,9 +1498,8 @@ set_metric_available_strats <- function(rv, metric, selected) {
   all_choices <- get_summary_available_choices(rv)
   new_allowed <- all_choices[all_choices %in% unique(selected %||% character(0))]
 
-  old_p1_selected <- get_metric_phase1_selected(rv, metric)
-  old_p2_selected <- get_metric_phase2_passed(rv, metric)
-  old_phase3 <- get_metric_phase3_selected(rv, metric)
+  old_curve_choice <- get_metric_curve_stratification(rv, metric)
+  old_recommendation <- get_metric_curve_strat_recommendation(rv, metric)
 
   if (identical(sort(new_allowed), sort(base_allowed))) {
     rv$summary_available_overrides[[metric]] <- NULL
@@ -1199,57 +1509,52 @@ set_metric_available_strats <- function(rv, metric, selected) {
 
   removed <- setdiff(current_allowed, new_allowed)
   invalidated <- ensure_metric_phase3_valid(rv, metric)
+  new_recommendation <- get_metric_curve_strat_recommendation(rv, metric)
 
-  phase1_notes <- if (length(intersect(old_p1_selected, removed)) > 0) {
+  exploratory_notes <- if (length(removed) > 0) {
     list(list(
       level = "warning",
       text = paste0(
-        "Summary removed unavailable Phase 1 selections: ",
-        format_strat_list(rv, intersect(old_p1_selected, removed))
+        "Unavailable stratifications were removed from this metric: ",
+        format_strat_list(rv, removed)
       )
     ))
   } else {
     list()
   }
 
-  phase2_notes <- if (length(intersect(old_p2_selected, removed)) > 0) {
+  cross_metric_notes <- if (!identical(old_recommendation, new_recommendation)) {
     list(list(
       level = "warning",
       text = paste0(
-        "Summary removed unavailable Phase 2 selections: ",
-        format_strat_list(rv, intersect(old_p2_selected, removed))
+        "The recommended curve stratification changed to ",
+        get_metric_curve_strat_label(rv, metric, new_recommendation),
+        " after the available stratifications were updated."
       )
     ))
   } else {
     list()
   }
 
-  phase3_notes <- if (isTRUE(invalidated) && !identical(old_phase3, "none")) {
+  verification_notes <- list()
+
+  reference_notes <- if (isTRUE(invalidated) && !identical(old_curve_choice, "none")) {
     list(list(
       level = "warning",
       text = paste0(
-        "Phase 3 selection was cleared because ",
-        get_strat_display_name(rv, old_phase3),
-        " is no longer available."
+        "The previous curve stratification (",
+        get_metric_curve_strat_label(rv, metric, old_curve_choice),
+        ") is no longer available. Phase 4 outputs were cleared."
       )
     ))
   } else {
     list()
   }
 
-  phase4_notes <- if (isTRUE(invalidated)) {
-    list(list(
-      level = "warning",
-      text = "Phase 4 outputs were cleared because the current Phase 3 selection became invalid."
-    ))
-  } else {
-    list()
-  }
-
-  set_metric_summary_edit_notes(rv, metric, "Phase 1", phase1_notes)
-  set_metric_summary_edit_notes(rv, metric, "Phase 2", phase2_notes)
-  set_metric_summary_edit_notes(rv, metric, "Phase 3", phase3_notes)
-  set_metric_summary_edit_notes(rv, metric, "Phase 4", phase4_notes)
+  set_metric_summary_edit_notes(rv, metric, "Exploratory", exploratory_notes)
+  set_metric_summary_edit_notes(rv, metric, "Cross-Metric Analysis", cross_metric_notes)
+  set_metric_summary_edit_notes(rv, metric, "Verification", verification_notes)
+  set_metric_summary_edit_notes(rv, metric, "Reference Curves", reference_notes)
   invisible(new_allowed)
 }
 
@@ -1282,35 +1587,121 @@ get_stratification_values <- function(data, strat_key, strat_config) {
 }
 
 get_metric_curve_rows <- function(rv, metric) {
-  entry <- rv$completed_metrics[[metric]]
-  if (is.null(entry) || identical(entry$type, "regional")) {
-    return(tibble::tibble())
+  get_metric_phase4_display_state(rv, metric)$curve_rows
+}
+
+manual_curve_info_from_rows <- function(curve_rows, metric, display_name = metric) {
+  curve_rows <- tibble::as_tibble(curve_rows %||% tibble::tibble())
+
+  if (nrow(curve_rows) == 0 || !("curve_source" %in% names(curve_rows))) {
+    return(list(
+      metric = metric,
+      display_name = display_name,
+      has_manual_curve = FALSE,
+      manual_curve_count = 0L,
+      manual_strata = character(0),
+      summary_label = NULL,
+      selection_label = paste0(display_name, " (manual curve)")
+    ))
   }
 
-  if (!is.null(entry$stratum_results)) {
-    rows <- purrr::map_dfr(entry$stratum_results, function(x) {
-      if (!is.null(x$reference_curve) && !is.null(x$reference_curve$curve_row)) {
-        x$reference_curve$curve_row
-      } else {
-        NULL
-      }
-    })
-    return(rows)
+  manual_rows <- curve_rows |>
+    dplyr::filter(as.character(curve_source %||% "") == "manual")
+
+  manual_strata <- character(0)
+  if ("stratum" %in% names(manual_rows) && nrow(manual_rows) > 0) {
+    manual_strata <- as.character(manual_rows$stratum %||% character(0))
+    manual_strata <- manual_strata[!is.na(manual_strata) & nzchar(manual_strata)]
+    manual_strata <- sort(unique(manual_strata))
   }
 
-  if (!is.null(entry$reference_curve) && !is.null(entry$reference_curve$curve_row)) {
-    return(entry$reference_curve$curve_row)
+  has_manual_curve <- nrow(manual_rows) > 0
+  summary_label <- if (!isTRUE(has_manual_curve)) {
+    NULL
+  } else if (length(manual_strata) > 0) {
+    paste0("Manual strata: ", paste(manual_strata, collapse = ", "))
+  } else if (nrow(manual_rows) > 1) {
+    "Manual curves"
+  } else {
+    "Manual curve"
   }
 
-  tibble::tibble()
+  selection_label <- if (!isTRUE(has_manual_curve)) {
+    paste0(display_name, " (manual curve)")
+  } else if (length(manual_strata) > 0) {
+    paste0(display_name, " (manual strata: ", paste(manual_strata, collapse = ", "), ")")
+  } else if (nrow(manual_rows) > 1) {
+    paste0(display_name, " (manual curves)")
+  } else {
+    paste0(display_name, " (manual curve)")
+  }
+
+  list(
+    metric = metric,
+    display_name = display_name,
+    has_manual_curve = has_manual_curve,
+    manual_curve_count = nrow(manual_rows),
+    manual_strata = manual_strata,
+    summary_label = summary_label,
+    selection_label = selection_label
+  )
+}
+
+get_metric_phase4_manual_curve_info <- function(rv, metric,
+                                                phase4 = get_metric_phase4_display_state(rv, metric)) {
+  display_name <- rv$metric_config[[metric]]$display_name %||% metric
+  manual_curve_info_from_rows(phase4$curve_rows %||% tibble::tibble(), metric, display_name)
+}
+
+build_summary_recompute_plan <- function(rv, metrics) {
+  metrics <- intersect(metrics %||% character(0), eligible_summary_metrics(rv$metric_config))
+  if (length(metrics) == 0) {
+    return(list(
+      auto_metrics = character(0),
+      manual_metrics = character(0),
+      manual_info = tibble::tibble()
+    ))
+  }
+
+  info_rows <- purrr::map_dfr(metrics, function(metric) {
+    info <- get_metric_phase4_manual_curve_info(rv, metric)
+    tibble::tibble(
+      metric = info$metric,
+      display_name = info$display_name,
+      has_manual_curve = isTRUE(info$has_manual_curve),
+      manual_curve_count = as.integer(info$manual_curve_count),
+      manual_strata = list(info$manual_strata),
+      summary_label = info$summary_label %||% NA_character_,
+      selection_label = info$selection_label
+    )
+  })
+
+  manual_info <- info_rows |>
+    dplyr::filter(has_manual_curve)
+
+  list(
+    auto_metrics = setdiff(metrics, manual_info$metric),
+    manual_metrics = manual_info$metric,
+    manual_info = manual_info
+  )
+}
+
+resolve_summary_recompute_metrics <- function(auto_metrics, manual_metrics,
+                                              selected_manual_metrics = character(0)) {
+  auto_metrics <- auto_metrics %||% character(0)
+  manual_metrics <- manual_metrics %||% character(0)
+  selected_manual_metrics <- intersect(selected_manual_metrics %||% character(0), manual_metrics)
+
+  unique(c(auto_metrics, selected_manual_metrics))
 }
 
 metric_has_official_curve <- function(rv, metric) {
   nrow(get_metric_curve_rows(rv, metric)) > 0
 }
 
-recompute_metric_phase4 <- function(rv, metric) {
-  selection <- get_metric_phase3_selected(rv, metric)
+recompute_metric_phase4 <- function(rv, metric, artifact_mode = c("full", "summary")) {
+  artifact_mode <- match.arg(artifact_mode)
+  selection <- get_metric_curve_stratification(rv, metric)
   decision_tbl <- build_metric_strat_decision(rv, metric, selection)
   sync_metric_decision_state(rv, metric, decision_tbl)
 
@@ -1327,42 +1718,56 @@ recompute_metric_phase4 <- function(rv, metric) {
           stratum_data,
           metric,
           rv$metric_config,
-          stratum_label = lvl
+          stratum_label = lvl,
+          build_plots = identical(artifact_mode, "full")
         )
       )
     }
 
+    curve_rows <- extract_metric_phase4_curve_rows(list(stratum_results = stratum_results))
     clear_metric_phase4_results(rv, metric)
     phase4_signature <- cache_metric_phase4_results(
       rv,
       metric,
       decision_tbl = decision_tbl,
-      stratum_results = stratum_results
+      stratum_results = stratum_results,
+      artifact_mode = artifact_mode
     )
-    rv$completed_metrics[[metric]] <- list(
+    update_metric_phase4_completed_entry(rv, metric, list(
       stratified = TRUE,
       strat_var = strat_key,
       strat_decision = decision_tbl,
       stratum_results = stratum_results,
-      phase4_signature = phase4_signature
-    )
+      phase4_signature = phase4_signature,
+      phase4_artifact_mode = artifact_mode,
+      phase4_curve_rows = curve_rows
+    ))
 
     return(invisible(rv$completed_metrics[[metric]]))
   }
 
-  curve_result <- build_reference_curve(rv$data, metric, rv$metric_config)
+  curve_result <- build_reference_curve(
+    rv$data,
+    metric,
+    rv$metric_config,
+    build_plots = identical(artifact_mode, "full")
+  )
+  curve_rows <- extract_metric_phase4_curve_rows(list(reference_curve = curve_result))
   clear_metric_phase4_results(rv, metric)
   phase4_signature <- cache_metric_phase4_results(
     rv,
     metric,
     decision_tbl = decision_tbl,
-    reference_curve = curve_result
+    reference_curve = curve_result,
+    artifact_mode = artifact_mode
   )
-  rv$completed_metrics[[metric]] <- list(
+  update_metric_phase4_completed_entry(rv, metric, list(
     strat_decision = decision_tbl,
     reference_curve = curve_result,
-    phase4_signature = phase4_signature
-  )
+    phase4_signature = phase4_signature,
+    phase4_artifact_mode = artifact_mode,
+    phase4_curve_rows = curve_rows
+  ))
 
   invisible(rv$completed_metrics[[metric]])
 }
@@ -1406,7 +1811,11 @@ recompute_metric_from_summary <- function(rv, metric, refresh_phase2 = TRUE,
   if (is.function(progress_cb)) {
     progress_cb("phase4", metric, 1L, 1L, "start")
   }
-  recompute_metric_phase4(rv, metric)
+  recompute_metric_phase4(
+    rv,
+    metric,
+    artifact_mode = if (identical(mode, "summary")) "summary" else "full"
+  )
   if (is.function(progress_cb)) {
     progress_cb("phase4", metric, 1L, 1L, "end")
   }
@@ -1466,7 +1875,11 @@ recompute_metrics_from_summary <- function(rv, metrics,
     if (is.function(progress_cb)) {
       progress_cb("phase4", metric, i, length(metrics), "start")
     }
-    recompute_metric_phase4(rv, metric)
+    recompute_metric_phase4(
+      rv,
+      metric,
+      artifact_mode = if (identical(mode, "summary")) "summary" else "full"
+    )
     if (is.function(on_metric_done)) {
       on_metric_done(metric)
     }
@@ -1497,14 +1910,73 @@ metric_summary_cell_value <- function(curve_rows, field, digits = 2) {
 metric_summary_range_value <- function(curve_rows, min_field, max_field, digits = 2) {
   if (nrow(curve_rows) == 0) return("Not computed")
   if (nrow(curve_rows) > 1) return(paste0(nrow(curve_rows), " strata"))
+
+  range_name <- sub("_min$", "", min_field)
+  if (identical(paste0(range_name, "_max"), max_field)) {
+    return(reference_curve_row_range_display(curve_rows, range_name, digits = digits))
+  }
+
   format_summary_range(curve_rows[[min_field]][1], curve_rows[[max_field]][1], digits)
 }
 
-build_metric_notes <- function(rv, metric) {
+build_summary_snapshot_context <- function(rv) {
+  available_choices <- get_summary_available_choices(rv)
+
+  list(
+    data_fingerprint = rv$data_fingerprint %||% NULL,
+    config_version = rv$config_version %||% 0L,
+    available_choices = available_choices,
+    strat_label_map = stats::setNames(vapply(available_choices, function(sk) {
+      get_strat_display_name(rv, sk)
+    }, character(1)), available_choices)
+  )
+}
+
+build_metric_summary_snapshot_signature <- function(rv, metric,
+                                                    context = build_summary_snapshot_context(rv),
+                                                    phase4 = get_metric_phase4_display_state(rv, metric),
+                                                    phase3_state = get_metric_phase3_display_state(rv, metric)) {
+  precheck <- get_metric_precheck_row(rv, metric)
+  p1_screening <- rv$all_layer1_results[[metric]] %||% NULL
+  p1_selected <- sort(get_metric_phase1_selected(rv, metric) %||% character(0))
+  p2_selected <- sort(get_metric_phase2_passed(rv, metric) %||% character(0))
+  phase3_flagged <- character(0)
+  if (!is.null(phase3_state$feasibility) && nrow(phase3_state$feasibility) > 0) {
+    phase3_flagged <- phase3_state$feasibility |>
+      dplyr::filter(feasibility_flag != "feasible") |>
+      dplyr::pull(stratification) |>
+      as.character() |>
+      sort()
+  }
+
+  list(
+    metric = metric,
+    data_fingerprint = context$data_fingerprint,
+    config_version = context$config_version,
+    n_obs = get_first_value(precheck, "n_obs", "N/A"),
+    available_selected = sort(get_metric_allowed_strats(rv, metric) %||% character(0)),
+    available_choices = context$available_choices %||% character(0),
+    curve_strat_used = get_metric_curve_stratification(rv, metric),
+    curve_strat_choices = as.list(get_metric_curve_strat_choices(rv, metric) %||% character(0)),
+    phase1_has_results = !is.null(p1_screening) && nrow(p1_screening) > 0,
+    phase1_selected = p1_selected,
+    phase2_selected = p2_selected,
+    phase3_strats = sort(phase3_state$strats %||% character(0)),
+    phase3_flagged = phase3_flagged,
+    phase4_source = phase4$source %||% "none",
+    phase4_signature = get_metric_phase4_signature(rv, metric),
+    phase4_artifact_mode = phase4$artifact_mode %||% NULL,
+    curve_rows = phase4$curve_rows %||% tibble::tibble(),
+    edit_notes = rv$summary_edit_notes[[metric]] %||% list()
+  )
+}
+
+build_metric_notes <- function(rv, metric,
+                               phase4 = get_metric_phase4_display_state(rv, metric)) {
   notes <- empty_summary_note_store()
 
-  add_note <- function(phase, level, text) {
-    notes[[phase]] <<- c(notes[[phase]], list(list(level = level, text = text)))
+  add_note <- function(step, level, text) {
+    notes[[step]] <<- c(notes[[step]], list(list(level = level, text = text)))
   }
 
   edit_notes <- get_metric_summary_edit_notes(rv, metric)
@@ -1515,67 +1987,61 @@ build_metric_notes <- function(rv, metric) {
   allowed <- get_metric_allowed_strats(rv, metric)
   p1_tbl <- get_metric_phase1_candidate_table(rv, metric)
   p1_selected <- get_metric_phase1_selected(rv, metric)
-  p1_dropped <- setdiff(intersect(allowed, p1_tbl$stratification), p1_selected)
   p1_screening <- rv$all_layer1_results[[metric]]
 
   if (is.null(p1_screening) || nrow(p1_screening) == 0) {
-    add_note("Phase 1", "warning", "Phase 1 screening has not been saved.")
+    add_note("Exploratory", "warning", "Exploratory screening has not been run for this metric.")
   } else {
-    add_note("Phase 1", "info", paste0("Candidates carried forward: ", format_strat_list(rv, p1_selected)))
-    if (length(p1_dropped) > 0) {
-      add_note("Phase 1", "warning", paste0("Dropped after Phase 1: ", format_strat_list(rv, p1_dropped)))
+    add_note("Exploratory", "info", paste0("Stratifications available for analysis: ", format_strat_list(rv, allowed)))
+    if (length(p1_selected) > 0) {
+      add_note("Exploratory", "info", paste0("Automatic screening shortlist: ", format_strat_list(rv, p1_selected)))
+    } else {
+      add_note("Exploratory", "warning", "No stratifications met the automatic exploratory shortlist criteria.")
     }
   }
 
   p2_selected <- get_metric_phase2_passed(rv, metric)
-  p2_dropped <- setdiff(p1_selected, p2_selected)
-  add_note("Phase 2", "info", paste0("Phase 2 passed: ", format_strat_list(rv, p2_selected)))
-  if (length(p2_dropped) > 0) {
-    add_note("Phase 2", "warning", paste0("Dropped after Phase 2: ", format_strat_list(rv, p2_dropped)))
-  }
-
-  phase3_selected <- get_metric_phase3_selected(rv, metric)
-  if (identical(phase3_selected, "none")) {
-    add_note("Phase 3", "info", "No Phase 3 stratification selected; Phase 4 uses an unstratified curve.")
+  if (length(p2_selected) > 0) {
+    add_note("Cross-Metric Analysis", "info", paste0("Broad-use candidates in the current cross-metric analysis: ", format_strat_list(rv, p2_selected)))
   } else {
-    add_note("Phase 3", "info", paste0("Phase 3 selected: ", get_strat_display_name(rv, phase3_selected)))
+    add_note("Cross-Metric Analysis", "info", "No broad-use candidates are currently highlighted for this metric.")
   }
 
-  decision_tbl <- if (!is.null(rv$completed_metrics[[metric]]$strat_decision)) {
-    rv$completed_metrics[[metric]]$strat_decision
-  } else if (!is.null(rv$metric_phase_cache[[metric]]$strat_decision_user)) {
-    rv$metric_phase_cache[[metric]]$strat_decision_user
-  } else if (identical(rv$current_metric, metric)) {
-    rv$strat_decision_user
+  verification_state <- get_metric_phase3_display_state(rv, metric)
+  if (is.null(verification_state)) {
+    add_note("Verification", "info", "Verification diagnostics have not been run yet.")
   } else {
-    NULL
+    add_note("Verification", "info", paste0("Verification diagnostics available for ", length(verification_state$strats %||% character(0)), " stratification(s)."))
+    if (!is.null(verification_state$feasibility) && nrow(verification_state$feasibility) > 0) {
+      flagged <- verification_state$feasibility |>
+        dplyr::filter(feasibility_flag != "feasible") |>
+        dplyr::pull(stratification)
+      if (length(flagged) > 0) {
+        add_note("Verification", "warning", paste0("Verification flagged feasibility concerns for: ", format_strat_list(rv, flagged)))
+      }
+    }
   }
 
-  if (!is.null(decision_tbl) && nrow(decision_tbl) > 0 && isTRUE(decision_tbl$needs_review[1])) {
-    add_note("Phase 3", "warning", decision_tbl$review_reason[1] %||% "Phase 3 selection needs review.")
-  }
+  curve_rows <- phase4$curve_rows %||% tibble::tibble()
+  curve_choice <- get_metric_curve_stratification(rv, metric)
+  curve_recommendation <- get_metric_curve_strat_recommendation(rv, metric)
 
-  curve_rows <- get_metric_curve_rows(rv, metric)
+  add_note("Reference Curves", "info", paste0("Stratification used for curves: ", get_metric_curve_strat_label(rv, metric, curve_choice)))
+  add_note("Reference Curves", "info", paste0("Current recommendation: ", get_metric_curve_strat_label(rv, metric, curve_recommendation)))
+
   if (nrow(curve_rows) == 0) {
-    add_note("Phase 4", "warning", "Phase 4 outputs are not current. Recompute is required.")
+    add_note("Reference Curves", "warning", "Reference curve outputs are not current. Recompute is required.")
   } else {
-    add_note("Phase 4", "info", paste0("Phase 4 outputs available for ", nrow(curve_rows), " curve(s)."))
+    add_note("Reference Curves", "info", paste0("Reference curve outputs available for ", nrow(curve_rows), " curve(s)."))
 
     curve_flags <- unique(curve_rows$curve_status[curve_rows$curve_status != "complete"])
     if (length(curve_flags) > 0) {
-      add_note("Phase 4", "warning",
-               paste0("Phase 4 curve issues: ", paste(curve_flags, collapse = ", ")))
+      add_note("Reference Curves", "warning",
+               paste0("Reference curve issues: ", paste(curve_flags, collapse = ", ")))
     }
 
-    decision_selected <- if (!is.null(decision_tbl) && nrow(decision_tbl) > 0 &&
-                             decision_tbl$decision_type[1] == "single") {
-      decision_tbl$selected_strat[1]
-    } else {
-      NA_character_
-    }
-
-    if (!is.na(decision_selected)) {
-      strat_values <- get_stratification_values(rv$data, decision_selected, rv$strat_config)
+    if (!identical(curve_choice, "none")) {
+      strat_values <- get_stratification_values(rv$data, curve_choice, rv$strat_config)
       min_n <- rv$metric_config[[metric]]$min_sample_size %||% 10
       sparse <- purrr::keep(sort(unique(stats::na.omit(strat_values))), function(lvl) {
         sum(strat_values == lvl, na.rm = TRUE) < min_n
@@ -1584,7 +2050,7 @@ build_metric_notes <- function(rv, metric) {
         sparse_text <- paste(vapply(sparse, function(lvl) {
           paste0(lvl, " (n=", sum(strat_values == lvl, na.rm = TRUE), ")")
         }, character(1)), collapse = ", ")
-        add_note("Phase 4", "warning",
+        add_note("Reference Curves", "warning",
                  paste0("Strata below minimum n=", min_n, ": ", sparse_text))
       }
     }
@@ -1593,14 +2059,15 @@ build_metric_notes <- function(rv, metric) {
   notes
 }
 
-metric_summary_status <- function(rv, metric) {
-  notes <- build_metric_notes(rv, metric)
+metric_summary_status <- function(rv, metric,
+                                  phase4 = get_metric_phase4_display_state(rv, metric)) {
+  notes <- build_metric_notes(rv, metric, phase4 = phase4)
   has_warning <- any(unlist(lapply(notes, function(items) {
     vapply(items, function(item) identical(item$level, "warning"), logical(1))
   })))
-  curve_rows <- get_metric_curve_rows(rv, metric)
+  curve_rows <- phase4$curve_rows %||% tibble::tibble()
 
-  if (!metric_has_official_curve(rv, metric)) {
+  if (nrow(curve_rows) == 0) {
     return(list(
       label = "Incomplete",
       badge = "fail",
@@ -1640,20 +2107,21 @@ metric_summary_status <- function(rv, metric) {
   )
 }
 
-build_metric_summary_snapshot <- function(rv, metric) {
+build_metric_summary_snapshot <- function(rv, metric,
+                                          context = build_summary_snapshot_context(rv)) {
   mc <- rv$metric_config[[metric]]
   precheck <- get_metric_precheck_row(rv, metric)
   allowed <- get_metric_allowed_strats(rv, metric)
-  available_choices <- get_summary_available_choices(rv)
-  phase3_choices <- get_metric_phase3_choices(rv, metric)
-  phase3_selected <- get_metric_phase3_selected(rv, metric)
-  if (!(phase3_selected %in% c("none", phase3_choices))) {
-    phase3_selected <- "none"
-  }
+  available_choices <- context$available_choices %||% get_summary_available_choices(rv)
+  curve_strat_used <- get_metric_curve_stratification(rv, metric)
+  curve_strat_choices <- get_metric_curve_strat_choices(rv, metric)
+  curve_strat_recommended <- get_metric_curve_strat_recommendation(rv, metric)
 
-  status <- metric_summary_status(rv, metric)
-  curve_rows <- get_metric_curve_rows(rv, metric)
-  strat_label_map <- stats::setNames(vapply(available_choices, function(sk) {
+  phase4 <- get_metric_phase4_display_state(rv, metric)
+  status <- metric_summary_status(rv, metric, phase4 = phase4)
+  curve_rows <- phase4$curve_rows
+  manual_curve_info <- get_metric_phase4_manual_curve_info(rv, metric, phase4 = phase4)
+  strat_label_map <- context$strat_label_map %||% stats::setNames(vapply(available_choices, function(sk) {
     get_strat_display_name(rv, sk)
   }, character(1)), available_choices)
 
@@ -1668,13 +2136,19 @@ build_metric_summary_snapshot <- function(rv, metric) {
     notes = status$notes,
     available_selected = allowed,
     available_choices = available_choices,
-    phase1_selected = get_metric_phase1_selected(rv, metric),
-    phase2_selected = get_metric_phase2_passed(rv, metric),
-    phase3_choices = phase3_choices,
-    phase3_selected = phase3_selected,
+    curve_strat_used = curve_strat_used,
+    curve_strat_recommended = curve_strat_recommended,
+    curve_strat_choices = curve_strat_choices,
     curve_rows = curve_rows,
-    completed = rv$completed_metrics[[metric]],
-    strat_label_map = strat_label_map
+    phase4 = phase4,
+    phase4_source = phase4$source,
+    phase4_artifact_mode = phase4$artifact_mode,
+    strat_label_map = strat_label_map,
+    has_manual_curve = manual_curve_info$has_manual_curve,
+    manual_curve_count = manual_curve_info$manual_curve_count,
+    manual_curve_strata = manual_curve_info$manual_strata,
+    manual_curve_label = manual_curve_info$summary_label,
+    manual_curve_selection_label = manual_curve_info$selection_label
   )
 }
 
@@ -1685,6 +2159,9 @@ build_stratified_stats_table <- function(curve_rows) {
   for (i in seq_len(nrow(curve_rows))) {
     row <- curve_rows[i, ]
     lbl <- row$stratum %||% paste0("Curve ", i)
+    if (is.null(lbl) || is.na(lbl) || !nzchar(lbl)) {
+      lbl <- paste0("Curve ", i)
+    }
     if (row$curve_status == "insufficient_data") {
       tbl[[lbl]] <- rep("N/A", length(stats))
     } else {
@@ -1714,15 +2191,348 @@ build_stratified_threshold_table <- function(curve_rows) {
   for (i in seq_len(nrow(curve_rows))) {
     row <- curve_rows[i, ]
     lbl <- row$stratum %||% paste0("Curve ", i)
+    if (is.null(lbl) || is.na(lbl) || !nzchar(lbl)) {
+      lbl <- paste0("Curve ", i)
+    }
     if (row$curve_status == "insufficient_data") {
       tbl[[lbl]] <- rep("N/A", 3)
     } else {
       tbl[[lbl]] <- c(
-        format_summary_range(row$functioning_min, row$functioning_max),
-        format_summary_range(row$at_risk_min, row$at_risk_max),
-        format_summary_range(row$not_functioning_min, row$not_functioning_max)
+        reference_curve_row_range_display(row, "functioning"),
+        reference_curve_row_range_display(row, "at_risk"),
+        reference_curve_row_range_display(row, "not_functioning")
       )
     }
   }
   tbl
+}
+
+flatten_summary_note_text <- function(notes, level = NULL) {
+  if (is.null(notes) || length(notes) == 0) {
+    return(character(0))
+  }
+
+  out <- character(0)
+  for (step in names(notes)) {
+    step_items <- notes[[step]] %||% list()
+    if (length(step_items) == 0) {
+      next
+    }
+
+    for (item in step_items) {
+      item_level <- item$level %||% NULL
+      if (!is.null(level) && !identical(item_level, level)) {
+        next
+      }
+
+      item_text <- item$text %||% ""
+      if (!nzchar(item_text)) {
+        next
+      }
+
+      out <- c(out, paste0(step, ": ", item_text))
+    }
+  }
+
+  unique(out)
+}
+
+metric_curve_summary_label <- function(snapshot) {
+  curve_rows <- tibble::as_tibble(snapshot$curve_rows %||% tibble::tibble())
+
+  if (nrow(curve_rows) == 0) {
+    return("Not available")
+  }
+
+  if (nrow(curve_rows) == 1) {
+    row <- curve_rows[1, , drop = FALSE]
+    if (all(c("q25", "q75") %in% names(row)) && all(is.finite(c(row$q25[1], row$q75[1])))) {
+      return(paste0(format_summary_number(row$q25[1]), " - ", format_summary_number(row$q75[1])))
+    }
+    return(reference_curve_row_range_display(row, "functioning"))
+  }
+
+  paste0(nrow(curve_rows), " stratified curves")
+}
+
+metric_appendix_plot <- function(rv, metric, snapshot = build_metric_summary_snapshot(rv, metric)) {
+  curve_rows <- tibble::as_tibble(snapshot$curve_rows %||% tibble::tibble())
+  if (nrow(curve_rows) == 0) {
+    return(NULL)
+  }
+
+  if (nrow(curve_rows) > 1) {
+    return(build_overlay_curve_plot(curve_rows, rv$metric_config))
+  }
+
+  phase4 <- snapshot$phase4 %||% list()
+  reference_curve <- phase4$reference_curve %||% NULL
+  if (!is.null(reference_curve$curve_plot)) {
+    return(reference_curve$curve_plot)
+  }
+
+  hydrated <- hydrate_reference_curve_result(
+    result = reference_curve,
+    data = rv$data,
+    metric_key = metric,
+    metric_config = rv$metric_config,
+    artifact_mode = "full"
+  )
+
+  hydrated$curve_plot %||% NULL
+}
+
+build_metric_status_export_row <- function(rv, snapshot) {
+  warning_notes <- flatten_summary_note_text(snapshot$notes, level = "warning")
+  info_notes <- flatten_summary_note_text(snapshot$notes, level = "info")
+
+  tibble::tibble(
+    metric = snapshot$metric,
+    display_name = snapshot$display_name,
+    family = snapshot$family,
+    units = snapshot$units,
+    direction = snapshot$direction,
+    n_obs = snapshot$n_obs,
+    status_label = snapshot$status$label %||% "Unknown",
+    status_badge = snapshot$status$badge %||% "unknown",
+    needs_review = isTRUE((snapshot$status$badge %||% "unknown") != "pass") || isTRUE(snapshot$has_manual_curve),
+    available_stratifications = format_strat_list(rv, snapshot$available_selected %||% character(0)),
+    selected_curve_stratification = snapshot$curve_strat_used %||% "none",
+    selected_curve_stratification_label = get_metric_curve_strat_label(rv, snapshot$metric, snapshot$curve_strat_used),
+    recommended_curve_stratification = snapshot$curve_strat_recommended %||% "none",
+    recommended_curve_stratification_label = get_metric_curve_strat_label(rv, snapshot$metric, snapshot$curve_strat_recommended),
+    phase4_source = snapshot$phase4_source %||% "none",
+    phase4_artifact_mode = snapshot$phase4_artifact_mode %||% "none",
+    curve_count = nrow(snapshot$curve_rows %||% tibble::tibble()),
+    curve_summary = metric_curve_summary_label(snapshot),
+    has_manual_curve = isTRUE(snapshot$has_manual_curve),
+    manual_curve_count = as.integer(snapshot$manual_curve_count %||% 0L),
+    manual_curve_label = snapshot$manual_curve_label %||% NA_character_,
+    warning_count = length(warning_notes),
+    warning_summary = if (length(warning_notes) > 0) paste(warning_notes, collapse = " | ") else NA_character_,
+    note_summary = if (length(c(warning_notes, info_notes)) > 0) {
+      paste(c(warning_notes, info_notes), collapse = " | ")
+    } else {
+      NA_character_
+    }
+  )
+}
+
+build_metric_decision_export_row <- function(rv, snapshot) {
+  decision_tbl <- tibble::as_tibble(snapshot$phase4$strat_decision %||% tibble::tibble())
+  if (nrow(decision_tbl) == 0) {
+    decision_tbl <- build_metric_strat_decision(rv, snapshot$metric, snapshot$curve_strat_used)
+  }
+
+  decision_tbl |>
+    dplyr::mutate(
+      display_name = snapshot$display_name,
+      selected_curve_stratification = snapshot$curve_strat_used %||% "none",
+      selected_curve_stratification_label = get_metric_curve_strat_label(rv, snapshot$metric, snapshot$curve_strat_used),
+      recommended_curve_stratification = snapshot$curve_strat_recommended %||% "none",
+      recommended_curve_stratification_label = get_metric_curve_strat_label(rv, snapshot$metric, snapshot$curve_strat_recommended),
+      phase4_source = snapshot$phase4_source %||% "none",
+      phase4_artifact_mode = snapshot$phase4_artifact_mode %||% "none",
+      status_label = snapshot$status$label %||% "Unknown",
+      status_badge = snapshot$status$badge %||% "unknown",
+      has_manual_curve = isTRUE(snapshot$has_manual_curve),
+      manual_curve_label = snapshot$manual_curve_label %||% NA_character_
+    )
+}
+
+build_phase2_summary_export <- function(rv) {
+  ranking <- rv$phase2_ranking %||% NULL
+  if (is.null(ranking) || !is.data.frame(ranking) || nrow(ranking) == 0) {
+    return(tibble::tibble())
+  }
+
+  ranking <- tibble::as_tibble(ranking)
+  if ("stratification" %in% names(ranking)) {
+    ranking <- ranking |>
+      dplyr::mutate(stratification_label = vapply(stratification, function(sk) {
+        get_strat_display_name(rv, sk)
+      }, character(1)))
+  }
+
+  settings <- rv$phase2_settings %||% empty_phase2_settings()
+  ranking |>
+    dplyr::mutate(
+      sig_threshold = settings$sig_threshold %||% NA_real_,
+      support_threshold = settings$support_threshold %||% NA_real_
+    )
+}
+
+build_summary_export_context <- function(rv,
+                                         metrics = eligible_summary_metrics(rv$metric_config),
+                                         include_appendix_plots = FALSE,
+                                         plots_dir = NULL) {
+  metrics <- intersect(metrics %||% character(0), eligible_summary_metrics(rv$metric_config))
+  snapshots <- lapply(metrics, function(metric) build_metric_summary_snapshot(rv, metric))
+  names(snapshots) <- metrics
+
+  metric_status <- purrr::map_dfr(snapshots, function(snapshot) {
+    build_metric_status_export_row(rv, snapshot)
+  })
+
+  threshold_rows <- purrr::map_dfr(snapshots, function(snapshot) {
+    curve_rows <- tibble::as_tibble(snapshot$curve_rows %||% tibble::tibble())
+    if (nrow(curve_rows) == 0) {
+      return(tibble::tibble())
+    }
+
+    reference_curve_rows_for_export(curve_rows)
+  })
+
+  current_decisions <- purrr::map_dfr(snapshots, function(snapshot) {
+    build_metric_decision_export_row(rv, snapshot)
+  })
+
+  decision_history <- rv$decision_log %||% tibble::tibble()
+  decision_history <- tibble::as_tibble(decision_history)
+
+  regional_entries <- purrr::keep(rv$completed_metrics %||% list(), function(entry) {
+    identical(entry$type %||% NULL, "regional")
+  })
+  regional_curves <- purrr::map_dfr(regional_entries, function(entry) {
+    tibble::as_tibble(entry$model_summary %||% tibble::tibble()) |>
+      dplyr::mutate(
+        response = entry$response %||% get_first_value(entry$model_summary, "response", NA_character_),
+        predictor = entry$predictor %||% get_first_value(entry$model_summary, "predictor", NA_character_),
+        stratify = entry$stratify %||% "None"
+      )
+  })
+
+  phase2_summary <- build_phase2_summary_export(rv)
+
+  appendix_metrics <- lapply(snapshots, function(snapshot) {
+    warning_notes <- flatten_summary_note_text(snapshot$notes, level = "warning")
+    metric_info <- list(
+      metric = snapshot$metric,
+      display_name = snapshot$display_name,
+      family = snapshot$family,
+      units = snapshot$units,
+      direction = snapshot$direction,
+      n_obs = snapshot$n_obs,
+      status_label = snapshot$status$label %||% "Unknown",
+      status_badge = snapshot$status$badge %||% "unknown",
+      selected_curve_stratification = snapshot$curve_strat_used %||% "none",
+      selected_curve_stratification_label = get_metric_curve_strat_label(rv, snapshot$metric, snapshot$curve_strat_used),
+      recommended_curve_stratification = snapshot$curve_strat_recommended %||% "none",
+      recommended_curve_stratification_label = get_metric_curve_strat_label(rv, snapshot$metric, snapshot$curve_strat_recommended),
+      phase4_source = snapshot$phase4_source %||% "none",
+      phase4_artifact_mode = snapshot$phase4_artifact_mode %||% "none",
+      curve_count = nrow(snapshot$curve_rows %||% tibble::tibble()),
+      curve_summary = metric_curve_summary_label(snapshot),
+      has_manual_curve = isTRUE(snapshot$has_manual_curve),
+      manual_curve_count = as.integer(snapshot$manual_curve_count %||% 0L),
+      manual_curve_label = snapshot$manual_curve_label %||% NA_character_,
+      warning_summary = if (length(warning_notes) > 0) paste(warning_notes, collapse = " | ") else NA_character_,
+      notes = snapshot$notes,
+      stats_table = if (nrow(snapshot$curve_rows %||% tibble::tibble()) > 0) {
+        build_stratified_stats_table(snapshot$curve_rows)
+      } else {
+        data.frame()
+      },
+      threshold_table = if (nrow(snapshot$curve_rows %||% tibble::tibble()) > 0) {
+        build_stratified_threshold_table(snapshot$curve_rows)
+      } else {
+        data.frame()
+      },
+      plot_file = NA_character_
+    )
+
+    if (isTRUE(include_appendix_plots) && !is.null(plots_dir)) {
+      plot_obj <- metric_appendix_plot(rv, snapshot$metric, snapshot = snapshot)
+      if (!is.null(plot_obj)) {
+        safe_metric <- gsub("[^A-Za-z0-9_-]+", "_", snapshot$metric)
+        plot_path <- file.path(plots_dir, paste0(safe_metric, "_curve.png"))
+        ggplot2::ggsave(plot_path, plot_obj, width = 8, height = 5, dpi = 300)
+        metric_info$plot_file <- file.path("plots", basename(plot_path))
+      }
+    }
+
+    metric_info
+  })
+
+  session_meta <- list(
+    generated_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"),
+    metric_count = length(metrics),
+    complete_metrics = sum(metric_status$status_label != "Incomplete"),
+    pending_metrics = sum(metric_status$status_label == "Incomplete"),
+    review_metrics = sum(metric_status$needs_review %||% FALSE, na.rm = TRUE),
+    manual_curve_metrics = sum(metric_status$has_manual_curve %||% FALSE, na.rm = TRUE),
+    regional_curve_rows = nrow(regional_curves),
+    regional_curve_sets = length(regional_entries),
+    decision_history_entries = nrow(decision_history),
+    phase2_available = nrow(phase2_summary) > 0
+  )
+
+  list(
+    session_meta = session_meta,
+    metric_status = metric_status,
+    threshold_rows = threshold_rows,
+    current_decisions = current_decisions,
+    decision_history = decision_history,
+    regional_curves = regional_curves,
+    phase2_summary = phase2_summary,
+    metrics = appendix_metrics
+  )
+}
+
+write_summary_export_stage <- function(rv,
+                                       bundle_dir,
+                                       include_appendix_plots = FALSE) {
+  dir.create(bundle_dir, showWarnings = FALSE, recursive = TRUE)
+  plots_dir <- if (isTRUE(include_appendix_plots)) {
+    dir.create(file.path(bundle_dir, "plots"), showWarnings = FALSE, recursive = TRUE)
+    file.path(bundle_dir, "plots")
+  } else {
+    NULL
+  }
+
+  context <- build_summary_export_context(
+    rv,
+    include_appendix_plots = include_appendix_plots,
+    plots_dir = plots_dir
+  )
+
+  file_map <- list(
+    metric_status = file.path(bundle_dir, "metric_status.csv"),
+    thresholds = file.path(bundle_dir, "reference_curve_thresholds.csv"),
+    stratification_decisions = file.path(bundle_dir, "stratification_decisions.csv"),
+    session_info = file.path(bundle_dir, "session_info.txt"),
+    summary = file.path(bundle_dir, "summary.txt"),
+    report_context = file.path(bundle_dir, "report_context.rds"),
+    phase2_summary = file.path(bundle_dir, "phase2_summary.csv"),
+    decision_history = file.path(bundle_dir, "decision_history.csv"),
+    regional_curves = file.path(bundle_dir, "regional_curves.csv")
+  )
+
+  utils::write.csv(context$metric_status, file_map$metric_status, row.names = FALSE)
+  utils::write.csv(context$threshold_rows, file_map$thresholds, row.names = FALSE)
+  utils::write.csv(context$current_decisions, file_map$stratification_decisions, row.names = FALSE)
+  utils::write.csv(context$phase2_summary, file_map$phase2_summary, row.names = FALSE)
+
+  if (nrow(context$decision_history) > 0) {
+    utils::write.csv(context$decision_history, file_map$decision_history, row.names = FALSE)
+  }
+  if (nrow(context$regional_curves) > 0) {
+    utils::write.csv(context$regional_curves, file_map$regional_curves, row.names = FALSE)
+  }
+
+  saveRDS(context, file_map$report_context)
+  writeLines(capture.output(sessionInfo()), file_map$session_info)
+  writeLines(c(
+    "StreamCurves Export Bundle",
+    paste0("Generated: ", context$session_meta$generated_at),
+    paste0("Summary metrics: ", context$session_meta$metric_count),
+    paste0("Complete metrics: ", context$session_meta$complete_metrics),
+    paste0("Pending metrics: ", context$session_meta$pending_metrics),
+    paste0("Metrics needing review: ", context$session_meta$review_metrics),
+    paste0("Manual curve metrics: ", context$session_meta$manual_curve_metrics),
+    paste0("Regional curve rows: ", context$session_meta$regional_curve_rows),
+    paste0("Decision history entries: ", context$session_meta$decision_history_entries)
+  ), file_map$summary)
+
+  list(bundle_dir = bundle_dir, files = file_map, context = context)
 }

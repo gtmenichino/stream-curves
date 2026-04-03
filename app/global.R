@@ -1,9 +1,10 @@
 ## Global setup
 ## Runs once when the app launches. Sources pipeline modules and loads
-## configs. The app starts in a no-data state until the user uploads a dataset.
+## configs. The app starts in a no-data state until the user uploads a workbook
+## or restores a saved session file.
 
 options(
-  shiny.maxRequestSize = 50 * 1024^2,
+  shiny.maxRequestSize = 150 * 1024^2,
   shiny.launch.browser = function(url) utils::browseURL(url)
 )
 
@@ -37,6 +38,7 @@ suppressPackageStartupMessages({
   library(tidyr)
   library(ggplot2)
   library(ggpubr)
+  library(plotly)
   library(patchwork)
   library(tibble)
   library(purrr)
@@ -55,6 +57,8 @@ suppressPackageStartupMessages({
 
 ## Source pipeline modules
 r_dir <- file.path(project_root, "R")
+source(file.path(r_dir, "00_plot_theme.R"), local = TRUE)
+source(file.path(r_dir, "00_input_workbook.R"), local = TRUE)
 source(file.path(r_dir, "01_load_data.R"), local = TRUE)
 source(file.path(r_dir, "02_clean_data.R"), local = TRUE)
 source(file.path(r_dir, "03_derive_variables.R"), local = TRUE)
@@ -75,6 +79,7 @@ source(file.path(r_dir, "12_regional_curves.R"), local = TRUE)
 ## Source app helpers
 source("helpers/theme.R", local = TRUE)
 source("helpers/badges.R", local = TRUE)
+source("helpers/notifications.R", local = TRUE)
 source("helpers/phase_tracker.R", local = TRUE)
 source("helpers/summary_page.R", local = TRUE)
 
@@ -83,7 +88,6 @@ source("modules/mod_data_overview.R", local = TRUE)
 source("modules/mod_precheck.R", local = TRUE)
 source("modules/mod_ref_curve.R", local = TRUE)
 source("modules/mod_regional_curve.R", local = TRUE)
-source("modules/mod_config_editor.R", local = TRUE)
 
 ## Source 4-phase modules
 source("modules/mod_landing_v2.R", local = TRUE)
@@ -91,24 +95,16 @@ source("modules/mod_phase1_exploration.R", local = TRUE)
 source("modules/mod_phase2_consistency.R", local = TRUE)
 source("modules/mod_phase3_verification.R", local = TRUE)
 source("modules/mod_phase4_finalization.R", local = TRUE)
+source("modules/mod_analysis_workspace.R", local = TRUE)
 source("modules/mod_summary_page.R", local = TRUE)
 source("modules/mod_summary_export.R", local = TRUE)
 
 ## Load configs
 config_dir <- file.path(project_root, "config")
-metric_config <- yaml::read_yaml(file.path(config_dir, "metric_registry.yaml"))
-strat_config <- yaml::read_yaml(file.path(config_dir, "stratification_registry.yaml"))
-predictor_config <- yaml::read_yaml(file.path(config_dir, "predictor_registry.yaml"))
-factor_recode_config <- yaml::read_yaml(file.path(config_dir, "factor_recode_registry.yaml"))
+metric_config <- list()
+strat_config <- list()
+predictor_config <- list()
+factor_recode_config <- list()
 output_config <- yaml::read_yaml(file.path(config_dir, "output_registry.yaml"))
 
-## Create sessions directory
-if (!isTRUE(connect_cloud_runtime)) {
-  dir.create(
-    file.path(project_root, "outputs", "sessions"),
-    showWarnings = FALSE,
-    recursive = TRUE
-  )
-}
-
-cli::cli_alert_success("App startup complete: configs loaded, awaiting dataset upload")
+cli::cli_alert_success("App startup complete: awaiting workbook upload")

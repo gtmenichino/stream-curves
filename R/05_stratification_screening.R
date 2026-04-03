@@ -6,6 +6,143 @@ library(ggpubr)
 library(ggplot2)
 library(cli)
 
+build_screening_plot_from_spec <- function(plot_spec,
+                                           metric_config,
+                                           strat_config,
+                                           font_profile = "default",
+                                           show_points = FALSE,
+                                           masked_site_ids = integer(0)) {
+  if (is.null(plot_spec) || !is.list(plot_spec)) {
+    return(NULL)
+  }
+
+  mc <- metric_config[[plot_spec$metric_key %||% ""]]
+  sc <- strat_config[[plot_spec$strat_key %||% ""]]
+  if (is.null(mc) || is.null(sc)) {
+    return(NULL)
+  }
+
+  df <- plot_spec$data %||% NULL
+  if (is.null(df) || !is.data.frame(df) || nrow(df) == 0) {
+    return(NULL)
+  }
+
+  masked_site_ids <- suppressWarnings(as.integer(masked_site_ids %||% integer(0)))
+  masked_site_ids <- masked_site_ids[!is.na(masked_site_ids)]
+  if (length(masked_site_ids) > 0 && streamcurves_site_id_column %in% names(df)) {
+    df <- df |>
+      dplyr::filter(!(.data[[streamcurves_site_id_column]] %in% masked_site_ids))
+  }
+
+  if (nrow(df) == 0) {
+    return(NULL)
+  }
+
+  if (identical(plot_spec$type, "paired")) {
+    p_base <- ggpubr::ggboxplot(
+      df,
+      x = plot_spec$secondary_col,
+      y = plot_spec$y_col,
+      fill = plot_spec$fill_col %||% plot_spec$secondary_col,
+      palette = plot_spec$palette %||% "viridis",
+      facet.by = plot_spec$primary_col,
+      short.panel.labs = TRUE
+    )
+
+    if (isTRUE(show_points)) {
+      p_base <- p_base +
+        ggplot2::geom_jitter(
+          ggplot2::aes_string(
+            x = plot_spec$secondary_col,
+            y = plot_spec$y_col
+          ),
+          width = 0.15,
+          height = 0,
+          alpha = 0.45,
+          size = 1.4,
+          color = "#2c3e50",
+          inherit.aes = FALSE
+        )
+    }
+
+    comparisons <- plot_spec$comparisons %||% NULL
+    if (!is.null(comparisons) && length(comparisons) > 0) {
+      p_base <- p_base +
+        ggpubr::stat_compare_means(
+          comparisons = comparisons,
+          method = "wilcox.test",
+          method.args = list(exact = FALSE),
+          size = streamcurves_geom_text_size(font_profile)
+        )
+    }
+
+    return(
+      p_base +
+        ggpubr::stat_compare_means(
+          method = "kruskal.test",
+          label.y.npc = "top",
+          label.x.npc = "center",
+          size = streamcurves_geom_text_size(font_profile)
+        ) +
+        ggplot2::labs(
+          title = plot_spec$title %||% paste0(mc$display_name, " by ", sc$display_name),
+          x = plot_spec$x_label %||% strat_config[[plot_spec$secondary_key %||% ""]]$display_name %||% plot_spec$secondary_col,
+          y = plot_spec$y_label %||% mc$display_name
+        ) +
+        streamcurves_plot_text_theme(profile = font_profile, legend_position = "none")
+    )
+  }
+
+  p_base <- ggpubr::ggboxplot(
+    df,
+    x = plot_spec$x_col,
+    y = plot_spec$y_col,
+    fill = plot_spec$fill_col %||% plot_spec$x_col,
+    palette = plot_spec$palette %||% "viridis"
+  )
+
+  if (isTRUE(show_points)) {
+    p_base <- p_base +
+      ggplot2::geom_jitter(
+        ggplot2::aes_string(
+          x = plot_spec$x_col,
+          y = plot_spec$y_col
+        ),
+        width = 0.15,
+        height = 0,
+        alpha = 0.45,
+        size = 1.4,
+        color = "#2c3e50",
+        inherit.aes = FALSE
+      )
+  }
+
+  comparisons <- plot_spec$comparisons %||% NULL
+  if (!is.null(comparisons) && length(comparisons) > 0) {
+    p_base <- p_base +
+      ggpubr::stat_compare_means(
+        comparisons = comparisons,
+        method = "wilcox.test",
+        method.args = list(exact = FALSE),
+        size = streamcurves_geom_text_size(font_profile)
+      )
+  }
+
+  p_base +
+    ggpubr::stat_compare_means(
+      method = "kruskal.test",
+      label.y.npc = "top",
+      label.x.npc = "center",
+      size = streamcurves_geom_text_size(font_profile)
+    ) +
+    ggplot2::labs(
+      title = plot_spec$title %||% paste0(mc$display_name, " by ", sc$display_name),
+      x = plot_spec$x_label %||% sc$display_name,
+      y = plot_spec$y_label %||% mc$display_name
+    ) +
+    streamcurves_plot_text_theme(profile = font_profile, legend_position = "none")
+}
+
 #' Screen a single metric against a single stratification variable
 #'
 #' @param data Tibble with derived variables
@@ -46,13 +183,20 @@ screen_stratification <- function(data, metric_key, strat_key,
         classification = "skipped", reason = "column_missing"
       ),
       pairwise_df = tibble::tibble(),
-      plot = NULL
+      plot = NULL,
+      plot_spec = NULL
     ))
   }
 
   ## Prepare data: drop NAs in both metric and stratification
+  plot_cols <- unique(c(
+    col_name,
+    strat_col,
+    intersect(c(streamcurves_site_id_column, streamcurves_site_label_column), names(data))
+  ))
+
   df <- data |>
-    dplyr::select(dplyr::all_of(c(col_name, strat_col))) |>
+    dplyr::select(dplyr::all_of(plot_cols)) |>
     tidyr::drop_na()
 
   ## Ensure stratification is factor
@@ -78,7 +222,8 @@ screen_stratification <- function(data, metric_key, strat_key,
         classification = "rejected_sparse", reason = "fewer_than_2_groups"
       ),
       pairwise_df = tibble::tibble(),
-      plot = NULL
+      plot = NULL,
+      plot_spec = NULL
     ))
   }
 
@@ -94,7 +239,8 @@ screen_stratification <- function(data, metric_key, strat_key,
         reason = paste0("fewer_than_2_groups_with_n>=", min_group_size)
       ),
       pairwise_df = tibble::tibble(),
-      plot = NULL
+      plot = NULL,
+      plot_spec = NULL
     ))
   }
 
@@ -170,59 +316,44 @@ screen_stratification <- function(data, metric_key, strat_key,
 
   ## ── Boxplot ───────────────────────────────────────────────────────────────
   p <- NULL
-  if (isTRUE(build_plot)) {
-    ## Build group labels with n
-    group_labels <- group_n |>
-      dplyr::mutate(label = paste0(.data[[strat_col]], "\n(n=", n, ")"))
+  group_labels <- group_n |>
+    dplyr::mutate(label = paste0(.data[[strat_col]], "\n(n=", n, ")"))
 
-    label_map <- stats::setNames(group_labels$label, group_labels[[strat_col]])
-    df$group_label <- label_map[as.character(df[[strat_col]])]
+  label_map <- stats::setNames(group_labels$label, group_labels[[strat_col]])
+  df$group_label <- label_map[as.character(df[[strat_col]])]
 
-    ## Pairwise comparisons for plot
-    comparisons <- NULL
-    if (!is.null(sc$pairwise_comparisons) && length(sc$pairwise_comparisons) > 0) {
-      comparisons <- lapply(sc$pairwise_comparisons, function(pair) {
-        c(label_map[pair[[1]]], label_map[pair[[2]]])
-      })
-      ## Remove comparisons with NA labels
-      comparisons <- Filter(function(x) all(!is.na(x)), comparisons)
-      if (length(comparisons) == 0) comparisons <- NULL
-    }
-
-    p <- tryCatch({
-      p_base <- ggpubr::ggboxplot(
-        df,
-        x = "group_label",
-        y = col_name,
-        fill = "group_label",
-        palette = "viridis"
-      )
-
-      if (!is.null(comparisons)) {
-        p_base <- p_base +
-          ggpubr::stat_compare_means(
-            comparisons = comparisons,
-            method = "wilcox.test",
-            method.args = list(exact = FALSE)
-          )
-      }
-
-      p_base +
-        ggpubr::stat_compare_means(
-          method = "kruskal.test",
-          label.y.npc = "top",
-          label.x.npc = "center"
-        ) +
-        ggplot2::labs(
-          title = paste0(mc$display_name, " by ", sc$display_name),
-          x = sc$display_name,
-          y = mc$display_name
-        ) +
-        ggplot2::theme(legend.position = "none")
-    }, error = function(e) {
-      cli::cli_alert_warning("Plot failed for {metric_key} x {strat_key}: {e$message}")
-      NULL
+  comparisons <- NULL
+  if (!is.null(sc$pairwise_comparisons) && length(sc$pairwise_comparisons) > 0) {
+    comparisons <- lapply(sc$pairwise_comparisons, function(pair) {
+      c(label_map[pair[[1]]], label_map[pair[[2]]])
     })
+    comparisons <- Filter(function(x) all(!is.na(x)), comparisons)
+    if (length(comparisons) == 0) comparisons <- NULL
+  }
+
+  plot_spec <- list(
+    type = "standard",
+    metric_key = metric_key,
+    strat_key = strat_key,
+    data = df,
+    x_col = "group_label",
+    y_col = col_name,
+    fill_col = "group_label",
+    comparisons = comparisons,
+    title = paste0(mc$display_name, " by ", sc$display_name),
+    x_label = sc$display_name,
+    y_label = mc$display_name,
+    palette = "viridis"
+  )
+
+  if (isTRUE(build_plot)) {
+    p <- tryCatch(
+      build_screening_plot_from_spec(plot_spec, metric_config, strat_config, show_points = FALSE),
+      error = function(e) {
+        cli::cli_alert_warning("Plot failed for {metric_key} x {strat_key}: {e$message}")
+        NULL
+      }
+    )
   }
 
   list(
@@ -238,7 +369,8 @@ screen_stratification <- function(data, metric_key, strat_key,
       reason = NA_character_
     ),
     pairwise_df = pairwise_df,
-    plot = p
+    plot = p,
+    plot_spec = plot_spec
   )
 }
 
@@ -275,12 +407,20 @@ screen_paired_stratification <- function(data, metric_key, strat_key,
         classification = "skipped", reason = "column_missing"
       ),
       pairwise_df = tibble::tibble(),
-      plot = NULL
+      plot = NULL,
+      plot_spec = NULL
     ))
   }
 
+  plot_cols <- unique(c(
+    col_name,
+    primary_col,
+    secondary_col,
+    intersect(c(streamcurves_site_id_column, streamcurves_site_label_column), names(data))
+  ))
+
   df <- data |>
-    dplyr::select(dplyr::all_of(c(col_name, primary_col, secondary_col))) |>
+    dplyr::select(dplyr::all_of(plot_cols)) |>
     tidyr::drop_na()
 
   df[[primary_col]] <- factor(df[[primary_col]])
@@ -304,44 +444,32 @@ screen_paired_stratification <- function(data, metric_key, strat_key,
   }
 
   p <- NULL
+  plot_spec <- list(
+    type = "paired",
+    metric_key = metric_key,
+    strat_key = strat_key,
+    data = df,
+    primary_key = primary_key,
+    secondary_key = secondary_key,
+    primary_col = primary_col,
+    secondary_col = secondary_col,
+    y_col = col_name,
+    fill_col = secondary_col,
+    comparisons = comparisons_list,
+    title = paste0(mc$display_name, " by ", sc$display_name),
+    x_label = strat_config[[secondary_key]]$display_name,
+    y_label = mc$display_name,
+    palette = "viridis"
+  )
+
   if (isTRUE(build_plot)) {
-    ## Faceted boxplot
-    p <- tryCatch({
-      p_base <- ggpubr::ggboxplot(
-        df,
-        x = secondary_col,
-        y = col_name,
-        fill = secondary_col,
-        palette = "viridis",
-        facet.by = primary_col,
-        short.panel.labs = TRUE
-      )
-
-      if (!is.null(comparisons_list)) {
-        p_base <- p_base +
-          ggpubr::stat_compare_means(
-            comparisons = comparisons_list,
-            method = "wilcox.test",
-            method.args = list(exact = FALSE)
-          )
+    p <- tryCatch(
+      build_screening_plot_from_spec(plot_spec, metric_config, strat_config, show_points = FALSE),
+      error = function(e) {
+        cli::cli_alert_warning("Paired plot failed for {metric_key} x {strat_key}: {e$message}")
+        NULL
       }
-
-      p_base +
-        ggpubr::stat_compare_means(
-          method = "kruskal.test",
-          label.y.npc = "top",
-          label.x.npc = "center"
-        ) +
-        ggplot2::labs(
-          title = paste0(mc$display_name, " by ", sc$display_name),
-          x = strat_config[[secondary_key]]$display_name,
-          y = mc$display_name
-        ) +
-        ggplot2::theme(legend.position = "none")
-    }, error = function(e) {
-      cli::cli_alert_warning("Paired plot failed for {metric_key} x {strat_key}: {e$message}")
-      NULL
-    })
+    )
   }
 
   ## Classification
@@ -363,7 +491,8 @@ screen_paired_stratification <- function(data, metric_key, strat_key,
       reason = if (min_cell_n < 5) "cells_with_n_lt_5" else NA_character_
     ),
     pairwise_df = tibble::tibble(),
-    plot = p
+    plot = p,
+    plot_spec = plot_spec
   )
 }
 

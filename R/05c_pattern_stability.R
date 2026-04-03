@@ -161,7 +161,7 @@ assess_pattern_stability <- function(data, metric_key, strat_key = NULL,
             x = pc$display_name,
             y = mc$display_name
           ) +
-          ggplot2::theme_minimal()
+          streamcurves_minimal_plot_theme(profile = "large_analysis")
       }, error = function(e) NULL)
 
       if (!is.null(p)) {

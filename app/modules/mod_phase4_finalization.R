@@ -12,10 +12,44 @@ mod_phase4_finalization_ui <- function(id, dialog_mode = FALSE) {
   uiOutput(ns("phase4_page"))
 }
 
-mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
+mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE, workspace_scope = "standalone") {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     prev_metric <- reactiveVal(NULL)
+    registered_stratum_editors <- reactiveVal(character(0))
+    stratum_editor_ids <- reactiveVal(stats::setNames(character(0), character(0)))
+    next_stratum_editor_seq <- reactiveVal(0L)
+    artifacts_loading <- reactiveVal(FALSE)
+    artifacts_error <- reactiveVal(NULL)
+    workspace_scope <- match.arg(workspace_scope, c("standalone", "analysis"))
+
+    phase4_workspace_active <- function(isolate_state = FALSE) {
+      if (!isTRUE(dialog_mode)) {
+        return(TRUE)
+      }
+
+      workspace_scope_is_active(
+        rv,
+        workspace_scope = workspace_scope,
+        standalone_modal_type = "phase4",
+        isolate_state = isolate_state
+      )
+    }
+
+    allocate_stratum_editor_ids <- function(levels) {
+      levels <- as.character(levels %||% character(0))
+      if (length(levels) == 0) {
+        return(stats::setNames(character(0), character(0)))
+      }
+
+      start <- next_stratum_editor_seq()
+      ids <- paste0(
+        "curve_editor_",
+        seq.int(from = start + 1L, length.out = length(levels))
+      )
+      next_stratum_editor_seq(start + length(levels))
+      stats::setNames(ids, levels)
+    }
 
     sync_phase4_inputs <- function(metric = rv$current_metric) {
       mc <- rv$metric_config[[metric]] %||% NULL
@@ -27,6 +61,10 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Data gate: show alert or full page ------------------------------------
     output$phase4_page <- renderUI({
+      if (!isTRUE(phase4_workspace_active())) {
+        return(NULL)
+      }
+
       if (is.null(rv$data)) return(no_data_alert())
 
       if (isTRUE(dialog_mode)) {
@@ -49,6 +87,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
               )
             )
           ),
+          uiOutput(ns("artifact_status")),
           uiOutput(ns("strat_confirm_card")),
           uiOutput(ns("stratified_display")),
           uiOutput(ns("unstratified_display"))
@@ -95,82 +134,19 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
         )
       )
     })
+    outputOptions(output, "phase4_page", suspendWhenHidden = FALSE)
 
-    ## -- Auto-derive stratification from Phase 1 if Phase 3 not confirmed ------
     observe({
+      if (!isTRUE(phase4_workspace_active())) {
+        return(invisible(NULL))
+      }
+
       req(rv$current_metric)
-      ## Only auto-derive if no manual decision exists
-      if (!is.null(rv$strat_decision_user)) return()
-
       metric <- rv$current_metric
-      candidates <- rv$phase1_candidates[[metric]]
-
-      if (is.null(candidates) || nrow(candidates) == 0) {
-        ## No candidates at all -- set decision to "none"
-        rv$strat_decision_user <- tibble::tibble(
-          decision_type     = "none",
-          selected_strat    = NA_character_,
-          selected_p_value  = NA_real_,
-          selected_n_groups = NA_integer_,
-          selected_min_n    = NA_integer_,
-          runner_up_strat   = NA_character_,
-          runner_up_p_value = NA_real_,
-          needs_review      = TRUE,
-          review_reason     = "Auto-derived: no Phase 1 candidates available",
-          notes             = "No stratification candidates found in Phase 1 screening"
-        )
-        return()
-      }
-
-      ## Pick best candidate: first "promising", else first "possible"
-      best <- candidates |>
-        dplyr::filter(candidate_status %in% c("promising", "possible")) |>
-        dplyr::arrange(match(candidate_status, c("promising", "possible")), p_value) |>
-        dplyr::slice(1)
-
-      if (nrow(best) == 0) {
-        ## No promising/possible candidates
-        rv$strat_decision_user <- tibble::tibble(
-          decision_type     = "none",
-          selected_strat    = NA_character_,
-          selected_p_value  = NA_real_,
-          selected_n_groups = NA_integer_,
-          selected_min_n    = NA_integer_,
-          runner_up_strat   = NA_character_,
-          runner_up_p_value = NA_real_,
-          needs_review      = TRUE,
-          review_reason     = "Auto-derived: no promising or possible candidates in Phase 1",
-          notes             = "All Phase 1 candidates were not_promising"
-        )
-        return()
-      }
-
-      ## Look up detailed stats from all_layer1_results
-      strat_name <- best$stratification
-      layer1 <- rv$all_layer1_results[[metric]]
-      l1_stats <- NULL
-      if (!is.null(layer1)) {
-        if (is.data.frame(layer1)) {
-          l1_stats <- layer1 |> dplyr::filter(stratification == strat_name) |> dplyr::slice(1)
-        } else if (is.list(layer1)) {
-          l1_df <- tryCatch(dplyr::bind_rows(layer1), error = function(e) NULL)
-          if (!is.null(l1_df)) {
-            l1_stats <- l1_df |> dplyr::filter(stratification == strat_name) |> dplyr::slice(1)
-          }
-        }
-      }
-
-      rv$strat_decision_user <- tibble::tibble(
-        decision_type     = "single",
-        selected_strat    = strat_name,
-        selected_p_value  = if (!is.null(l1_stats) && nrow(l1_stats) > 0) l1_stats$p_value[1] else best$p_value,
-        selected_n_groups = if (!is.null(l1_stats) && nrow(l1_stats) > 0) as.integer(l1_stats$n_groups[1]) else NA_integer_,
-        selected_min_n    = if (!is.null(l1_stats) && nrow(l1_stats) > 0) as.integer(l1_stats$min_group_n[1]) else as.integer(best$min_group_n),
-        runner_up_strat   = NA_character_,
-        runner_up_p_value = NA_real_,
-        needs_review      = TRUE,
-        review_reason     = "Auto-derived from Phase 1 candidates (Phase 3 not confirmed)",
-        notes             = paste0("Auto-selected: ", strat_name)
+      sync_metric_decision_state(
+        rv,
+        metric,
+        build_metric_strat_decision(rv, metric, get_metric_curve_stratification(rv, metric))
       )
     })
 
@@ -194,6 +170,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Stratum info reactive -------------------------------------------------
     stratum_info <- reactive({
+      req(isTRUE(phase4_workspace_active()))
       strat <- rv$strat_decision_user
 
       if (is.null(strat) || is.na(strat$selected_strat) || strat$decision_type != "single") {
@@ -212,10 +189,163 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       get_stratification_values(rv$data, info$strat_var, rv$strat_config)
     })
 
+    observe({
+      if (!isTRUE(phase4_workspace_active())) {
+        return(invisible(NULL))
+      }
+
+      info <- stratum_info()
+
+      if (!isTRUE(info$has_strata) || length(info$levels %||% character(0)) == 0) {
+        stratum_editor_ids(stats::setNames(character(0), character(0)))
+        registered_stratum_editors(character(0))
+        return(invisible(NULL))
+      }
+
+      current_map <- stratum_editor_ids()
+      if (!identical(names(current_map), info$levels)) {
+        stratum_editor_ids(allocate_stratum_editor_ids(info$levels))
+        registered_stratum_editors(character(0))
+      }
+
+      invisible(NULL)
+    })
+
     current_phase4_decision <- reactive({
       req(rv$current_metric)
       get_metric_phase4_decision_state(rv, rv$current_metric)
     })
+
+    sync_analysis_tab_state <- function(status = NULL, request_id = NULL, complete = FALSE) {
+      request_id <- request_id %||% shiny::isolate(rv$analysis_tab_request_id %||% NULL)
+      if (!isTRUE(dialog_mode) ||
+          !identical(workspace_scope, "analysis") ||
+          !isTRUE(phase4_workspace_active(isolate_state = TRUE)) ||
+          !analysis_tab_request_is_current(rv, request_id)) {
+        return(invisible(NULL))
+      }
+
+      resolved_status <- status %||% if (is.null(artifacts_error()) || !nzchar(artifacts_error() %||% "")) {
+        "ready"
+      } else {
+        "error"
+      }
+
+      set_analysis_tab_status(rv, "reference_curves", resolved_status, request_id)
+      if (isTRUE(complete)) {
+        complete_analysis_tab_preload(rv, "reference_curves", resolved_status, request_id)
+      }
+
+      invisible(resolved_status)
+    }
+
+    refresh_phase4_artifacts <- function(metric = rv$current_metric,
+                                         request_id = NULL,
+                                         complete = FALSE,
+                                         defer = FALSE) {
+      if (!isTRUE(phase4_workspace_active(isolate_state = TRUE))) {
+        return(invisible(FALSE))
+      }
+
+      target_metric <- metric %||% NULL
+      if (is.null(target_metric) || identical(target_metric, "")) {
+        return(invisible(FALSE))
+      }
+
+      request_id <- request_id %||% shiny::isolate(rv$analysis_tab_request_id %||% NULL)
+      if (!metric_needs_phase4_artifact_refresh(rv, target_metric, artifact_mode = "full")) {
+        artifacts_loading(FALSE)
+        artifacts_error(NULL)
+        sync_analysis_tab_state(request_id = request_id, complete = complete)
+        return(invisible(FALSE))
+      }
+
+      artifacts_loading(TRUE)
+      artifacts_error(NULL)
+
+      run_refresh <- function() {
+        if (isTRUE(dialog_mode) &&
+            identical(workspace_scope, "analysis") &&
+            !analysis_tab_request_is_current(rv, request_id)) {
+          artifacts_loading(FALSE)
+          return(invisible(NULL))
+        }
+
+        tryCatch(
+          {
+            preload_metric_phase4_workspace(
+              rv,
+              target_metric,
+              artifact_mode = "full"
+            )
+            artifacts_error(NULL)
+          },
+          error = function(e) {
+            artifacts_error(conditionMessage(e))
+          },
+          finally = {
+            artifacts_loading(FALSE)
+            sync_analysis_tab_state(request_id = request_id, complete = complete)
+          }
+        )
+
+        invisible(NULL)
+      }
+
+      if (isTRUE(defer)) {
+        session$onFlushed(function() {
+          shiny::isolate(run_refresh())
+          invisible(NULL)
+        }, once = TRUE)
+      } else {
+        run_refresh()
+      }
+
+      invisible(TRUE)
+    }
+
+    persist_stratified_curve_results <- function(results) {
+      metric <- shiny::isolate(rv$current_metric)
+      if (is.null(metric) || identical(metric, "")) {
+        return(invisible(NULL))
+      }
+      decision_tbl <- shiny::isolate(current_phase4_decision())
+      info <- shiny::isolate(stratum_info())
+
+      stratum_results <- purrr::imap(results, function(result, lvl) {
+        list(reference_curve = hydrate_reference_curve_result(
+          result,
+          shiny::isolate(rv$data),
+          metric,
+          shiny::isolate(rv$metric_config),
+          stratum_label = lvl,
+          artifact_mode = "full"
+        ))
+      })
+
+      curve_rows <- extract_metric_phase4_curve_rows(list(stratum_results = stratum_results))
+      phase4_signature <- cache_metric_phase4_results(
+        rv,
+        metric,
+        decision_tbl = decision_tbl,
+        stratum_results = stratum_results,
+        artifact_mode = "full"
+      )
+
+      if (metric %in% names(rv$completed_metrics)) {
+        update_metric_phase4_completed_entry(rv, metric, list(
+          stratified = TRUE,
+          strat_var = info$strat_var,
+          strat_decision = decision_tbl,
+          stratum_results = stratum_results,
+          phase4_signature = phase4_signature,
+          phase4_artifact_mode = "full",
+          phase4_curve_rows = curve_rows
+        ))
+      }
+
+      invisible(stratum_results)
+    }
 
     ## -- Metric change observer ------------------------------------------------
     observeEvent(input$metric_select, {
@@ -236,8 +366,10 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
     }, ignoreInit = TRUE)
 
     observeEvent(rv$workspace_modal_ready_nonce, {
-      if (isTRUE(dialog_mode) && identical(rv$workspace_modal_type, "phase4")) {
+      if (isTRUE(dialog_mode) && isTRUE(phase4_workspace_active())) {
         modal_metric <- rv$workspace_modal_metric %||% rv$current_metric
+        artifacts_loading(FALSE)
+        artifacts_error(NULL)
         session$onFlushed(function() {
           if (is.null(modal_metric) || identical(modal_metric, "")) {
             return(invisible(NULL))
@@ -251,8 +383,75 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       }
     }, ignoreInit = TRUE)
 
+    observeEvent(rv$analysis_tab_preload_nonce, {
+      if (!isTRUE(dialog_mode) ||
+          !identical(workspace_scope, "analysis") ||
+          !isTRUE(phase4_workspace_active()) ||
+          !identical(rv$analysis_tab_preload_tab %||% NULL, "reference_curves")) {
+        return(invisible(NULL))
+      }
+
+      request_id <- rv$analysis_tab_request_id %||% NULL
+      modal_metric <- rv$workspace_modal_metric %||% rv$current_metric
+      if (is.null(modal_metric) || identical(modal_metric, "") ||
+          !analysis_tab_request_is_current(rv, request_id)) {
+        return(invisible(NULL))
+      }
+
+      refresh_phase4_artifacts(
+        modal_metric,
+        request_id = request_id,
+        complete = TRUE,
+        defer = TRUE
+      )
+    }, ignoreInit = TRUE)
+
+    output$artifact_status <- renderUI({
+      if (!isTRUE(dialog_mode) ||
+          !identical(workspace_scope, "analysis") ||
+          !isTRUE(phase4_workspace_active())) {
+        return(NULL)
+      }
+
+      if (isTRUE(artifacts_loading())) {
+        return(div(
+          class = "alert alert-info d-flex align-items-center gap-2",
+          icon("spinner", class = "fa-spin"),
+          tags$span("Loading full reference curve visuals. Summary results stay available while plots regenerate.")
+        ))
+      }
+
+      error_text <- artifacts_error()
+      if (!is.null(error_text) && nzchar(error_text)) {
+        return(div(
+          class = "alert alert-danger d-flex justify-content-between align-items-center flex-wrap gap-2",
+          tags$span(paste0("Could not load full reference curve visuals: ", error_text)),
+          actionButton(
+            ns("retry_artifacts"),
+            "Retry details",
+            class = "btn btn-outline-danger btn-sm"
+          )
+        ))
+      }
+
+      NULL
+    })
+
+    observeEvent(input$retry_artifacts, {
+      refresh_phase4_artifacts(
+        rv$current_metric,
+        request_id = rv$analysis_tab_request_id %||% NULL,
+        complete = TRUE,
+        defer = TRUE
+      )
+    }, ignoreInit = TRUE)
+
     ## -- Initialize phase4_data when metric/strat changes ----------------------
     observe({
+      if (!isTRUE(phase4_workspace_active())) {
+        return(invisible(NULL))
+      }
+
       req(rv$current_metric)
       ## Always set full dataset; stratified display handles its own filtering
       rv$phase4_data <- rv$data
@@ -326,14 +525,12 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Stratification confirmation card --------------------------------------
     output$strat_confirm_card <- renderUI({
-      strat <- rv$strat_decision_user
-      if (is.null(strat)) {
-        return(div(
-          class = "alert alert-warning mb-3",
-          icon("exclamation-triangle"),
-          " No stratification selected. Complete Phase 3 first, or proceed without stratification."
-        ))
-      }
+      req(rv$current_metric)
+      metric <- rv$current_metric
+      strat <- current_phase4_decision()
+      current_choice <- get_metric_curve_stratification(rv, metric)
+      recommended_choice <- get_metric_curve_strat_recommendation(rv, metric)
+      choice_choices <- get_metric_curve_strat_choices(rv, metric)
 
       info <- stratum_info()
       strat_name <- if (strat$decision_type == "single" && !is.na(strat$selected_strat)) {
@@ -343,17 +540,31 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
         "None"
       }
 
-      ## Auto-derived banner (shown when needs_review is TRUE)
-      auto_banner <- NULL
-      if (isTRUE(strat$needs_review)) {
-        auto_banner <- div(
-          class = "alert alert-warning mb-2 py-2",
-          icon("robot"),
-          tags$strong(" Auto-selected stratification"),
-          " \u2014 based on Phase 1 screening results. ",
-          "You can return to Phase 3 to review and confirm, or proceed directly."
+      selector_card <- card(
+        class = "mb-3",
+        card_header("Curve Stratification"),
+        card_body(
+          shinyWidgets::pickerInput(
+            ns("curve_strat_choice"),
+            "Stratification used for curves:",
+            choices = choice_choices,
+            selected = current_choice,
+            multiple = FALSE,
+            width = "100%",
+            options = shinyWidgets::pickerOptions(
+              container = ".modal-dialog.workspace-modal-dialog",
+              size = 8,
+              liveSearch = FALSE
+            )
+          ),
+          div(
+            class = if (identical(current_choice, recommended_choice)) "alert alert-info mb-0 py-2" else "alert alert-warning mb-0 py-2",
+            icon("wand-magic-sparkles"),
+            tags$strong(" Recommended stratification: "),
+            get_metric_curve_strat_label(rv, metric, recommended_choice)
+          )
         )
-      }
+      )
 
       if (info$has_strata) {
         ## Build level listing with sample sizes
@@ -363,7 +574,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
         })
 
         tagList(
-          auto_banner,
+          selector_card,
           div(
             class = "alert alert-info mb-3",
             tags$strong("Stratification: "), strat_name,
@@ -374,7 +585,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
         )
       } else {
         tagList(
-          auto_banner,
+          selector_card,
           div(
             class = "alert alert-info mb-3",
             tags$strong("Stratification: "), strat_name,
@@ -392,14 +603,29 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       }
     })
 
+    observeEvent(input$curve_strat_choice, {
+      req(rv$current_metric)
+      metric <- rv$current_metric
+      old_choice <- get_metric_curve_stratification(rv, metric)
+      new_choice <- set_metric_curve_stratification(rv, metric, input$curve_strat_choice %||% "none")
+
+      if (!identical(old_choice, new_choice)) {
+        notify_workspace_refresh(rv)
+      }
+    }, ignoreInit = TRUE)
+
     ## -- Sub-module server (always runs; UI conditionally shown) ----------------
-    ref_curve_events <- mod_ref_curve_server("ref_curve", rv)
+    ref_curve_events <- mod_ref_curve_server("ref_curve", rv, workspace_scope = workspace_scope)
 
     ## =========================================================================
     ## NON-STRATIFIED DISPLAY
     ## =========================================================================
 
     output$unstratified_display <- renderUI({
+      if (!isTRUE(phase4_workspace_active())) {
+        return(NULL)
+      }
+
       info <- stratum_info()
       if (info$has_strata) return(NULL)
       mod_ref_curve_ui(ns("ref_curve"))
@@ -411,16 +637,30 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Compute all strata curves eagerly -------------------------------------
     all_strata_results <- reactive({
+      req(isTRUE(phase4_workspace_active()))
       info <- stratum_info()
       req(info$has_strata)
       metric <- rv$current_metric
       req(metric)
       decision_tbl <- current_phase4_decision()
+      strat_vals <- strat_values()
 
-      if (metric_has_phase4_cache(rv, metric, decision_tbl)) {
+      if (metric_has_phase4_cache(rv, metric, decision_tbl, artifact_mode = "summary")) {
         cached <- get_metric_phase4_cached_result(rv, metric)
         cached_results <- lapply(info$levels, function(lvl) {
-          cached$stratum_results[[lvl]]$reference_curve %||% NULL
+          entry <- cached$stratum_results[[lvl]] %||% NULL
+          if (is.null(entry)) {
+            return(NULL)
+          }
+
+          hydrate_reference_curve_result(
+            entry$reference_curve %||% entry,
+            rv$data[strat_vals == lvl, , drop = FALSE],
+            metric,
+            rv$metric_config,
+            stratum_label = lvl,
+            artifact_mode = cached$artifact_mode %||% "full"
+          )
         })
         names(cached_results) <- info$levels
 
@@ -430,46 +670,136 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       }
 
       results <- list()
-      strat_vals <- strat_values()
       for (lvl in info$levels) {
         stratum_data <- rv$data[strat_vals == lvl, , drop = FALSE]
-        results[[lvl]] <- build_reference_curve(stratum_data, metric,
-                                                 rv$metric_config, stratum_label = lvl)
+        results[[lvl]] <- build_reference_curve(
+          stratum_data,
+          metric,
+          rv$metric_config,
+          stratum_label = lvl
+        )
       }
-      cache_metric_phase4_results(
-        rv,
-        metric,
-        decision_tbl = decision_tbl,
-        stratum_results = lapply(results, function(result) {
-          list(reference_curve = result)
-        })
-      )
       results
     })
 
     ## -- Bind curve_row tibbles across strata ----------------------------------
     all_strata_curve_rows <- reactive({
-      results <- all_strata_results()
-      req(results)
-      dplyr::bind_rows(purrr::map(results, "curve_row"))
-    })
-
-    ## -- Populate rv$stratum_results for persistence ---------------------------
-    observe({
+      req(isTRUE(phase4_workspace_active()))
       results <- all_strata_results()
       req(results)
       metric <- rv$current_metric
-      for (lvl in names(results)) {
-        if (is.null(rv$stratum_results[[metric]])) rv$stratum_results[[metric]] <- list()
-        rv$stratum_results[[metric]][[lvl]] <- list(reference_curve = results[[lvl]])
+      dplyr::bind_rows(purrr::imap(results, function(result, lvl) {
+        normalized <- normalize_reference_curve_result(
+          result,
+          metric_config = rv$metric_config,
+          metric_key = metric,
+          stratum_label = lvl
+        )
+        normalized$curve_row %||% tibble::tibble()
+      }))
+    })
+
+    observe({
+      if (!isTRUE(phase4_workspace_active())) {
+        return(invisible(NULL))
       }
+
+      info <- stratum_info()
+      req(info$has_strata)
+      editor_id_map <- stratum_editor_ids()
+      req(length(editor_id_map) == length(info$levels))
+
+      new_editor_ids <- setdiff(unname(editor_id_map), registered_stratum_editors())
+      if (length(new_editor_ids) == 0) {
+        return(invisible(NULL))
+      }
+
+      for (lvl in info$levels) {
+        editor_id <- editor_id_map[[lvl]]
+        if (!(editor_id %in% new_editor_ids)) {
+          next
+        }
+
+        local({
+          stratum_level <- lvl
+          child_editor_id <- editor_id
+
+          mod_reference_curve_editor_server(
+            child_editor_id,
+            current_result = reactive({
+              results <- all_strata_results()
+              results[[stratum_level]] %||% NULL
+            }),
+            higher_is_better = reactive({
+              req(rv$current_metric)
+              rv$metric_config[[rv$current_metric]]$higher_is_better
+            }),
+            on_apply = function(points) {
+              metric <- shiny::isolate(rv$current_metric)
+              strat_vals <- shiny::isolate(strat_values())
+              metric_config <- shiny::isolate(rv$metric_config)
+              results <- shiny::isolate(all_strata_results())
+              stratum_data <- shiny::isolate(rv$data[strat_vals == stratum_level, , drop = FALSE])
+
+              results[[stratum_level]] <- build_reference_curve_from_points(
+                stratum_data,
+                metric,
+                metric_config,
+                curve_points = points,
+                stratum_label = stratum_level
+              )
+
+              persist_stratified_curve_results(results)
+              notify_workspace_refresh(rv)
+              showNotification(
+                paste0("Applied manual curve edits for stratum '", stratum_level, "'."),
+                type = "message",
+                duration = 4
+              )
+            },
+            on_reset = function() {
+              metric <- shiny::isolate(rv$current_metric)
+              strat_vals <- shiny::isolate(strat_values())
+              metric_config <- shiny::isolate(rv$metric_config)
+              results <- shiny::isolate(all_strata_results())
+              stratum_data <- shiny::isolate(rv$data[strat_vals == stratum_level, , drop = FALSE])
+
+              results[[stratum_level]] <- build_reference_curve(
+                stratum_data,
+                metric,
+                metric_config,
+                stratum_label = stratum_level
+              )
+
+              persist_stratified_curve_results(results)
+              notify_workspace_refresh(rv)
+              showNotification(
+                paste0("Reset stratum '", stratum_level, "' to the auto-generated curve."),
+                type = "message",
+                duration = 4
+              )
+            }
+          )
+        })
+      }
+
+      registered_stratum_editors(union(registered_stratum_editors(), new_editor_ids))
+      invisible(NULL)
     })
 
     ## -- Stratified display UI -------------------------------------------------
     output$stratified_display <- renderUI({
+      if (!isTRUE(phase4_workspace_active())) {
+        return(NULL)
+      }
+
       info <- stratum_info()
       if (!info$has_strata) return(NULL)
 
+      results <- all_strata_results()
+      req(results)
+      editor_id_map <- stratum_editor_ids()
+      req(length(editor_id_map) == length(info$levels))
       curve_rows <- all_strata_curve_rows()
       req(curve_rows)
 
@@ -551,6 +881,30 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
           bslib::card_body(DT::DTOutput(ns("strat_threshold_table")))
         ),
 
+        bslib::card(
+          class = "mb-3",
+          bslib::card_header("Manual Curve Editors"),
+          bslib::card_body(
+            bslib::accordion(
+              id = ns("strat_curve_editors"),
+              open = FALSE,
+              !!!lapply(info$levels, function(lvl) {
+                editor_result <- results[[lvl]]
+                label <- if (identical(editor_result$curve_source %||% "auto", "manual")) {
+                  paste0(lvl, " (Manual)")
+                } else {
+                  lvl
+                }
+
+                bslib::accordion_panel(
+                  title = label,
+                  mod_reference_curve_editor_ui(ns(editor_id_map[[lvl]]), title = paste0("Edit ", lvl, " Curve"))
+                )
+              })
+            )
+          )
+        ),
+
         ## Download buttons
         div(
           class = "d-flex gap-2 mb-3",
@@ -574,6 +928,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Overlay scoring curves plot -------------------------------------------
     output$strat_curve_plot <- renderPlot({
+      req(isTRUE(phase4_workspace_active()))
       curve_rows <- all_strata_curve_rows()
       req(curve_rows)
       p <- build_overlay_curve_plot(curve_rows, rv$metric_config)
@@ -583,6 +938,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Single-stratum fallback curve plot ------------------------------------
     output$strat_curve_plot_single <- renderPlot({
+      req(isTRUE(phase4_workspace_active()))
       results <- all_strata_results()
       req(results)
       ## Find the first stratum with a valid curve_plot
@@ -596,6 +952,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Overlay distribution plot ---------------------------------------------
     output$strat_dist_plot <- renderPlot({
+      req(isTRUE(phase4_workspace_active()))
       info <- stratum_info()
       req(info$has_strata)
       curve_rows <- all_strata_curve_rows()
@@ -614,6 +971,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Descriptive statistics table (strata as columns) ----------------------
     output$strat_desc_table <- DT::renderDT({
+      req(isTRUE(phase4_workspace_active()))
       curve_rows <- all_strata_curve_rows()
       req(curve_rows)
 
@@ -646,6 +1004,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
 
     ## -- Scoring thresholds table (strata as columns) --------------------------
     output$strat_threshold_table <- DT::renderDT({
+      req(isTRUE(phase4_workspace_active()))
       curve_rows <- all_strata_curve_rows()
       req(curve_rows)
 
@@ -666,9 +1025,9 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
           tbl[[lvl]] <- rep("N/A", 3)
         } else {
           tbl[[lvl]] <- c(
-            paste0(round(row$functioning_min, 1), " \u2013 ", round(row$functioning_max, 1)),
-            paste0(round(row$at_risk_min, 1), " \u2013 ", round(row$at_risk_max, 1)),
-            paste0(round(row$not_functioning_min, 1), " \u2013 ", round(row$not_functioning_max, 1))
+            reference_curve_row_range_display(row, "functioning", digits = 1),
+            reference_curve_row_range_display(row, "at_risk", digits = 1),
+            reference_curve_row_range_display(row, "not_functioning", digits = 1)
           )
         }
       }
@@ -707,15 +1066,21 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
         rv,
         metric,
         decision_tbl = decision_tbl,
-        stratum_results = rv$stratum_results[[metric]]
+        stratum_results = rv$stratum_results[[metric]],
+        artifact_mode = "full"
       )
-      rv$completed_metrics[[metric]] <- list(
+      curve_rows <- extract_metric_phase4_curve_rows(list(
+        stratum_results = rv$stratum_results[[metric]]
+      ))
+      update_metric_phase4_completed_entry(rv, metric, list(
         stratified = TRUE,
         strat_var = info$strat_var,
         strat_decision = decision_tbl,
         stratum_results = rv$stratum_results[[metric]],
-        phase4_signature = phase4_signature
-      )
+        phase4_signature = phase4_signature,
+        phase4_artifact_mode = "full",
+        phase4_curve_rows = curve_rows
+      ))
 
       showNotification(
         paste0(rv$metric_config[[metric]]$display_name,
@@ -766,7 +1131,7 @@ mod_phase4_finalization_server <- function(id, rv, dialog_mode = FALSE) {
       content = function(file) {
         curve_rows <- all_strata_curve_rows()
         req(curve_rows)
-        readr::write_csv(curve_rows, file)
+        readr::write_csv(reference_curve_rows_for_export(curve_rows), file)
       }
     )
   })

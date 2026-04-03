@@ -140,13 +140,13 @@ run_diagnostics <- function(data, metric_key, formula, model_family = "gaussian"
         ggplot2::geom_smooth(se = FALSE, color = "blue", method = "loess",
                               formula = y ~ x) +
         ggplot2::labs(title = "Residuals vs Fitted", x = "Fitted Values", y = "Residuals") +
-        ggplot2::theme_minimal()
+        streamcurves_minimal_plot_theme()
 
       p2 <- ggplot2::ggplot(plot_data, ggplot2::aes(sample = std_resid)) +
         ggplot2::stat_qq() +
         ggplot2::stat_qq_line(color = "red") +
         ggplot2::labs(title = "Normal Q-Q", x = "Theoretical Quantiles", y = "Standardized Residuals") +
-        ggplot2::theme_minimal()
+        streamcurves_minimal_plot_theme()
 
       p3 <- ggplot2::ggplot(plot_data, ggplot2::aes(x = fitted, y = sqrt_std_resid)) +
         ggplot2::geom_point() +
@@ -154,13 +154,13 @@ run_diagnostics <- function(data, metric_key, formula, model_family = "gaussian"
                               formula = y ~ x) +
         ggplot2::labs(title = "Scale-Location", x = "Fitted Values",
                       y = expression(sqrt("Standardized Residuals"))) +
-        ggplot2::theme_minimal()
+        streamcurves_minimal_plot_theme()
 
       p4 <- ggplot2::ggplot(plot_data, ggplot2::aes(x = leverage, y = std_resid)) +
         ggplot2::geom_point() +
         ggplot2::geom_hline(yintercept = 0, linetype = "dashed") +
         ggplot2::labs(title = "Residuals vs Leverage", x = "Leverage", y = "Standardized Residuals") +
-        ggplot2::theme_minimal()
+        streamcurves_minimal_plot_theme()
 
       patchwork::wrap_plots(p1, p2, p3, p4, ncol = 2)
     }, error = function(e) {

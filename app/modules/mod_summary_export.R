@@ -1,10 +1,131 @@
-## ── Module: Summary / Export (merged) ─────────────────────────────────────────────
-## 3 pills: Overview | Export | Details
-## Absorbs mod_summary.R, mod_export.R, and mod_appendix.R.
+## -- Module: Export -----------------------------------------------------------
+## Export current-session CSVs, bundles, and reports from the Reference Curves page.
 
 library(shiny)
 library(bslib)
-library(DT)
+
+empty_named_choices <- function() {
+  stats::setNames(character(0), character(0))
+}
+
+boxplot_metric_choices <- function(metric_config) {
+  metric_config <- metric_config %||% list()
+  metric_keys <- names(metric_config) %||% character(0)
+
+  if (length(metric_keys) == 0) {
+    return(empty_named_choices())
+  }
+
+  metric_keys <- metric_keys[vapply(metric_keys, function(metric_key) {
+    metric_entry <- metric_config[[metric_key]]
+    !is.null(metric_entry) && !identical(metric_entry$metric_family %||% NULL, "categorical")
+  }, logical(1))]
+
+  if (length(metric_keys) == 0) {
+    return(empty_named_choices())
+  }
+
+  stats::setNames(
+    metric_keys,
+    vapply(metric_keys, function(metric_key) {
+      metric_config[[metric_key]]$display_name %||% metric_key
+    }, character(1))
+  )
+}
+
+boxplot_strat_choices <- function(rv, metric_key) {
+  if (is.null(metric_key) || length(metric_key) == 0 || !nzchar(metric_key)) {
+    return(empty_named_choices())
+  }
+
+  allowed <- get_metric_allowed_strats(rv, metric_key)
+  if (length(allowed) == 0) {
+    return(empty_named_choices())
+  }
+
+  stats::setNames(
+    allowed,
+    vapply(allowed, function(strat_key) {
+      rv$strat_config[[strat_key]]$display_name %||% strat_key
+    }, character(1))
+  )
+}
+
+summary_export_output_enabled <- function(rv, key, default = TRUE) {
+  cfg <- rv$output_config$summary_outputs[[key]] %||% NULL
+  enabled <- cfg$enabled %||% NULL
+  if (is.null(enabled)) default else isTRUE(enabled)
+}
+
+summary_export_report_enabled <- function(rv, key, default = TRUE) {
+  cfg <- rv$output_config$report_products[[key]] %||% NULL
+  enabled <- cfg$enabled %||% NULL
+  if (is.null(enabled)) default else isTRUE(enabled)
+}
+
+summary_export_report_meta <- function(rv, key, default_file, default_format) {
+  cfg <- rv$output_config$report_products[[key]] %||% list()
+  report_file <- cfg$file %||% default_file
+  report_path <- if (grepl("^[A-Za-z]:|^/", report_file)) {
+    report_file
+  } else {
+    file.path(project_root, report_file)
+  }
+
+  list(
+    path = report_path,
+    format = cfg$format %||% default_format
+  )
+}
+
+summary_export_stage_dir <- function(prefix = "summary_export") {
+  file.path(
+    tempdir(),
+    paste0(prefix, "_", format(Sys.time(), "%Y%m%d%H%M%S"), "_", sprintf("%06d", sample.int(999999, 1)))
+  )
+}
+
+summary_export_copy_file <- function(path, file) {
+  if (!file.exists(path)) {
+    stop("Requested export was not generated.")
+  }
+  ok <- file.copy(path, file, overwrite = TRUE)
+  if (!isTRUE(ok)) {
+    stop("Failed to prepare export file.")
+  }
+}
+
+summary_export_zip_dir <- function(source_dir, file) {
+  parent_dir <- dirname(source_dir)
+  base_dir <- basename(source_dir)
+  old_wd <- setwd(parent_dir)
+  on.exit(setwd(old_wd), add = TRUE)
+  utils::zip(file, files = list.files(base_dir, full.names = TRUE, recursive = TRUE))
+}
+
+export_stat_card <- function(title, value, detail = NULL) {
+  card(
+    class = "h-100",
+    card_header(title),
+    card_body(
+      tags$div(class = "fs-3 fw-semibold", value),
+      if (!is.null(detail) && nzchar(detail)) {
+        tags$p(class = "text-muted small mb-0 mt-2", detail)
+      }
+    )
+  )
+}
+
+export_download_card <- function(title, description, control) {
+  card(
+    class = "h-100",
+    card_header(title),
+    card_body(
+      tags$p(class = "mb-3", description),
+      control
+    )
+  )
+}
 
 mod_summary_export_ui <- function(id) {
   ns <- NS(id)
@@ -15,625 +136,265 @@ mod_summary_export_server <- function(id, rv) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
-    ## ── Data gate: show alert or full page ────────────────────────────────────
-    output$summary_page <- renderUI({
-      if (is.null(rv$data)) return(no_data_alert())
+    export_context <- reactive({
+      req(rv$data)
+      build_summary_export_context(rv)
+    })
 
-      navset_pill(
-        ## ── Pill 1: Overview ────────────────────────────────────────────────────
-        nav_panel(
-          "Overview",
-          icon = bsicons::bs_icon("clipboard-data"),
-
-          card(card_header("Metric Progress"), card_body(DT::DTOutput(ns("progress_table")))),
-          card(card_header("Completed Metrics"), card_body(DT::DTOutput(ns("completed_table")))),
-          card(card_header("Decision Log"), card_body(DT::DTOutput(ns("decision_log_table")))),
-          card(card_header("Screening Results Summary"), card_body(DT::DTOutput(ns("overview_screening_table")))),
-          card(card_header("Pending Metrics"), card_body(uiOutput(ns("pending_list")))),
-          card(card_header("Visual Summary"), card_body(uiOutput(ns("visual_summary_ui")))),
-          card(
-            card_header("Cross-Metric Correlation"),
-            card_body(
-              actionButton(ns("run_cross"), "Run Cross-Metric Analysis",
-                           class = "btn btn-primary", icon = icon("project-diagram")),
-              uiOutput(ns("cross_ui"))
-            )
-          )
-        ),
-
-        ## ── Pill 2: Export ──────────────────────────────────────────────────────
-        nav_panel(
-          "Export",
-          icon = bsicons::bs_icon("download"),
-
-          explanation_card(
-            "Export Results",
-            p("Download analysis results for completed metrics. All files are generated
-               from the current session's completed metrics and decision log.")
-          ),
-
-          card(
-            card_header("Available Downloads"),
-            card_body(
-              layout_column_wrap(
-                width = 1 / 3,
-                card(card_header("Reference Curve Thresholds"),
-                     card_body(p("CSV table of Q25/Q75 thresholds and functional category boundaries."),
-                               downloadButton(ns("dl_thresholds"), "Download CSV", class = "btn btn-outline-primary"))),
-                card(card_header("Stratification Decisions"),
-                     card_body(p("CSV table of stratification decisions for all completed metrics."),
-                               downloadButton(ns("dl_strat"), "Download CSV", class = "btn btn-outline-primary"))),
-                card(card_header("Regional Curves"),
-                     card_body(p("CSV table of power-function coefficients for regional curves."),
-                               downloadButton(ns("dl_regional"), "Download CSV", class = "btn btn-outline-primary"))),
-                card(card_header("Decision Log"),
-                     card_body(p("CSV of all stratification decisions."),
-                               downloadButton(ns("dl_decision_log"), "Download CSV", class = "btn btn-outline-primary"))),
-                card(card_header("Full Results Bundle"),
-                     card_body(p("ZIP archive containing all CSVs, decision log, and session info."),
-                               downloadButton(ns("dl_bundle"), "Download ZIP", class = "btn btn-primary")))
-              )
-            )
-          ),
-
-          card(
-            card_header("Report Generation"),
-            card_body(
-              p(class = "text-muted", "Generate formatted reports from existing Quarto templates."),
-              layout_column_wrap(
-                width = 1 / 3,
-                actionButton(ns("gen_summary_pdf"), "Generate PDF Summary",
-                             class = "btn btn-outline-secondary", icon = icon("file-pdf")),
-                actionButton(ns("gen_dashboard"), "Generate HTML Dashboard",
-                             class = "btn btn-outline-secondary", icon = icon("chart-bar")),
-                actionButton(ns("gen_appendix"), "Generate Full Appendix",
-                             class = "btn btn-outline-secondary", icon = icon("book"))
-              ),
-              uiOutput(ns("report_status"))
-            )
-          )
-        ),
-
-        ## ── Pill 3: Details ─────────────────────────────────────────────────────
-        nav_panel(
-          "Details",
-          icon = bsicons::bs_icon("journal-text"),
-
-          explanation_card(
-            "Full Results Explorer",
-            p("Browse all screening results, boxplots, and stratification details.
-               Read-only view \u2014 no decisions are made here.")
-          ),
-
-          card(card_header("All Screening Results"), card_body(DT::DTOutput(ns("all_screening_table")))),
-          card(
-            card_header("Boxplot Viewer"),
-            card_body(
-              layout_column_wrap(
-                width = 1 / 2,
-                selectInput(ns("boxplot_metric"), "Metric:", choices = NULL),
-                selectInput(ns("boxplot_strat"), "Stratification:", choices = NULL)
-              ),
-              uiOutput(ns("boxplot_output"))
-            )
-          ),
-          card(card_header("Stratification Registry"), card_body(DT::DTOutput(ns("strat_registry_table"))))
-        )
+    stage_exports <- function(include_appendix_plots = FALSE) {
+      bundle_dir <- summary_export_stage_dir(
+        if (isTRUE(include_appendix_plots)) "summary_export_appendix" else "summary_export_bundle"
       )
-    })
+      write_summary_export_stage(
+        rv,
+        bundle_dir = bundle_dir,
+        include_appendix_plots = include_appendix_plots
+      )
+    }
 
-    ## ════════════════════════════════════════════════════════════════════════
-    ## Pill 1: Overview
-    ## ════════════════════════════════════════════════════════════════════════
+    render_report_download <- function(report_key, default_file, default_format,
+                                       output_name, include_appendix_plots = FALSE) {
+      output[[output_name]] <- downloadHandler(
+        filename = function() {
+          paste0(report_key, ".", if (identical(default_format, "html")) "html" else "pdf")
+        },
+        content = function(file) {
+          if (!requireNamespace("quarto", quietly = TRUE)) {
+            stop("The quarto package is required to render reports.")
+          }
 
-    ## ── Metric progress table ────────────────────────────────────────────────
-    output$progress_table <- DT::renderDT({
-      all_keys <- names(rv$metric_config)
-      eligible <- all_keys[sapply(all_keys, function(mk) {
-        rv$metric_config[[mk]]$metric_family != "categorical"
-      })]
+          report_meta <- summary_export_report_meta(rv, report_key, default_file, default_format)
+          if (!file.exists(report_meta$path)) {
+            stop("Report template not found.")
+          }
 
-      rows <- purrr::map_dfr(eligible, function(mk) {
-        mc <- rv$metric_config[[mk]]
-        screened <- mk %in% names(rv$all_layer1_results)
-        cands <- rv$phase1_candidates[[mk]]
-        has_candidates <- !is.null(cands)
-        cand_count <- if (has_candidates) {
-          sum(sapply(cands, function(x) x$tier %in% c("promising", "possible")))
-        } else { 0L }
+          staged <- stage_exports(include_appendix_plots = include_appendix_plots)
+          render_dir <- summary_export_stage_dir(paste0(report_key, "_render"))
+          dir.create(render_dir, showWarnings = FALSE, recursive = TRUE)
+          report_input <- file.path(render_dir, basename(report_meta$path))
+          rendered_file <- file.path(render_dir, basename(file))
+          file.copy(report_meta$path, report_input, overwrite = TRUE)
 
-        has_decision <- !is.null(rv$phase3_verification[[mk]]) ||
-          (!is.null(rv$decision_log) && nrow(rv$decision_log) > 0 &&
-           any(rv$decision_log$metric == mk & rv$decision_log$phase == "phase3"))
+          quarto::quarto_render(
+            input = report_input,
+            output_format = report_meta$format,
+            execute_params = list(
+              session_dir = normalizePath(staged$bundle_dir, winslash = "/", mustWork = FALSE)
+            ),
+            execute_dir = render_dir,
+            output_file = basename(file),
+            quiet = TRUE
+          )
 
-        completed <- mk %in% names(rv$completed_metrics)
-
-        tibble::tibble(
-          Metric    = mc$display_name %||% mk,
-          Screened  = if (screened) "Yes" else "",
-          Candidates = if (has_candidates) as.character(cand_count) else "",
-          Decision  = if (has_decision) "Yes" else "",
-          Completed = if (completed) "Yes" else ""
-        )
-      })
-
-      DT::datatable(rows,
-        options = list(pageLength = 25, dom = "tip", scrollX = TRUE),
-        rownames = FALSE, class = "compact stripe"
-      ) |>
-        DT::formatStyle("Screened",
-          backgroundColor = DT::styleEqual("Yes", "rgba(39,174,96,0.15)")) |>
-        DT::formatStyle("Candidates",
-          backgroundColor = DT::styleInterval(0.5, c("white", "rgba(52,152,219,0.15)"))) |>
-        DT::formatStyle("Decision",
-          backgroundColor = DT::styleEqual("Yes", "rgba(39,174,96,0.15)")) |>
-        DT::formatStyle("Completed",
-          backgroundColor = DT::styleEqual("Yes", "rgba(39,174,96,0.15)"))
-    })
-
-    ## ── Completed metrics table ─────────────────────────────────────────────
-    output$completed_table <- DT::renderDT({
-      completed <- rv$completed_metrics
-      if (length(completed) == 0) {
-        return(DT::datatable(
-          data.frame(Message = "No metrics marked complete yet. In Phase 4, review the reference curve then click 'Mark Complete \u2713'."),
-          options = list(dom = "t"), rownames = FALSE
-        ))
-      }
-
-      rows <- purrr::map_dfr(names(completed), function(mk) {
-        entry <- completed[[mk]]
-
-        if (!is.null(entry$type) && entry$type == "regional") {
-          return(tibble::tibble(
-            Metric = mk, Type = "Regional Curve",
-            Stratification = entry$stratify %||% "None",
-            Q25 = NA_character_, Q75 = NA_character_, Status = "N/A"
-          ))
+          summary_export_copy_file(rendered_file, file)
         }
-
-        strat <- if (!is.null(entry$strat_decision) &&
-                     entry$strat_decision$decision_type == "single") {
-          entry$strat_decision$selected_strat
-        } else { "None" }
-
-        q25_val <- if (!is.null(entry$reference_curve)) sprintf("%.2f", entry$reference_curve$curve_row$q25) else "N/A"
-        q75_val <- if (!is.null(entry$reference_curve)) sprintf("%.2f", entry$reference_curve$curve_row$q75) else "N/A"
-        status  <- if (!is.null(entry$reference_curve)) entry$reference_curve$curve_row$curve_status else "N/A"
-
-        tibble::tibble(
-          Metric = rv$metric_config[[mk]]$display_name %||% mk,
-          Type = "Reference Curve", Stratification = strat,
-          Q25 = q25_val, Q75 = q75_val, Status = status
-        )
-      })
-
-      DT::datatable(rows, options = list(dom = "t", paging = FALSE, scrollX = TRUE),
-                     rownames = FALSE, class = "compact stripe")
-    })
-
-    ## ── Decision log table ──────────────────────────────────────────────────
-    output$decision_log_table <- DT::renderDT({
-      log <- rv$decision_log
-      if (is.null(log) || nrow(log) == 0) {
-        return(DT::datatable(
-          data.frame(message = "No decisions recorded yet."),
-          options = list(dom = "t"), rownames = FALSE
-        ))
-      }
-
-      display_cols <- intersect(
-        c("timestamp", "metric", "decision_stage", "phase", "selected_strat",
-          "layer1_p_value", "layer2_effect_size", "rationale"),
-        names(log)
       )
-      display_df <- log[, display_cols, drop = FALSE]
+    }
 
-      if ("layer1_p_value" %in% names(display_df)) {
-        display_df$layer1_p_value <- round(display_df$layer1_p_value, 4)
-      }
-      if ("layer2_effect_size" %in% names(display_df)) {
-        display_df$layer2_effect_size <- round(display_df$layer2_effect_size, 4)
-      }
-
-      DT::datatable(display_df,
-                     options = list(pageLength = 20, scrollX = TRUE),
-                     rownames = FALSE, class = "compact stripe")
-    })
-
-    ## ── Overview screening summary ───────────────────────────────────────────
-    output$overview_screening_table <- DT::renderDT({
-      all_l1 <- rv$all_layer1_results
-      if (length(all_l1) == 0) {
-        return(DT::datatable(
-          data.frame(Message = "No screening results yet. Run Phase 1 screening first."),
-          options = list(dom = "t"), rownames = FALSE
-        ))
-      }
-
-      combined <- dplyr::bind_rows(all_l1) |>
-        dplyr::mutate(
-          metric_display = sapply(metric, function(mk) rv$metric_config[[mk]]$display_name %||% mk),
-          strat_display = sapply(stratification, function(sk) rv$strat_config[[sk]]$display_name %||% sk),
-          p_value = round(p_value, 4)
-        ) |>
-        dplyr::select(
-          Metric = metric_display, Stratification = strat_display,
-          `p-value` = p_value, `Min n` = min_group_n,
-          Classification = classification
-        )
-
-      DT::datatable(combined,
-        options = list(pageLength = 15, scrollX = TRUE, dom = "tip"),
-        rownames = FALSE, class = "compact stripe", filter = "top"
-      ) |>
-        DT::formatStyle("p-value",
-          backgroundColor = DT::styleInterval(
-            c(0.05, 0.10),
-            c("rgba(39,174,96,0.15)", "rgba(243,156,18,0.15)", "white")
-          ))
-    })
-
-    ## ── Pending metrics ─────────────────────────────────────────────────────
-    output$pending_list <- renderUI({
-      completed_keys <- names(rv$completed_metrics)
-      all_keys <- names(rv$metric_config)
-      eligible <- all_keys[sapply(all_keys, function(mk) {
-        rv$metric_config[[mk]]$metric_family != "categorical"
-      })]
-      pending <- setdiff(eligible, completed_keys)
-
-      if (length(pending) == 0) {
-        return(div(class = "text-success fw-bold", icon("check-circle"),
-                   " All eligible metrics have been analyzed!"))
-      }
-
-      tags$ul(class = "list-unstyled", lapply(pending, function(mk) {
-        mc <- rv$metric_config[[mk]]
-        screened <- mk %in% names(rv$all_layer1_results)
-        has_candidates <- mk %in% names(rv$phase1_candidates)
-
-        status_icons <- tagList(
-          if (screened) tags$span(class = "badge bg-info me-1", "Screened"),
-          if (has_candidates) tags$span(class = "badge bg-primary me-1", "Candidates"),
-          if (!screened) tags$span(class = "badge bg-secondary me-1", "Not started")
-        )
-
-        tags$li(class = "mb-1",
-          tags$strong(mc$display_name %||% mk),
-          tags$span(class = "text-muted small ms-1", paste0("(", mc$metric_family, ")")),
-          tags$span(class = "ms-2", status_icons)
-        )
-      }))
-    })
-
-    ## ── Visual summary ──────────────────────────────────────────────────────
-    output$visual_summary_ui <- renderUI({
-      completed <- rv$completed_metrics
-      if (length(completed) == 0) {
-        return(div(class = "text-muted", "Complete at least one metric."))
-      }
-      tagList(
-        plotOutput(ns("summary_graphic"), height = "400px"),
-        div(class = "mt-2",
-            downloadButton(ns("dl_summary_graphic"), "Download Summary Graphic",
-                           class = "btn btn-outline-primary"))
-      )
-    })
-
-    output$summary_graphic <- renderPlot({
-      completed <- rv$completed_metrics
-      req(length(completed) > 0)
-      std <- purrr::keep(completed, ~ is.null(.x$type) || .x$type != "regional")
-      if (length(std) == 0) return(NULL)
-
-      summary_df <- purrr::map_dfr(names(std), function(mk) {
-        entry <- std[[mk]]
-        strat <- if (!is.null(entry$strat_decision) &&
-                     entry$strat_decision$decision_type == "single") {
-          entry$strat_decision$selected_strat
-        } else { "None" }
-        tibble::tibble(
-          metric = rv$metric_config[[mk]]$display_name %||% mk,
-          stratification = strat
-        )
-      })
-
-      ggplot2::ggplot(summary_df, ggplot2::aes(x = metric, y = 1, fill = stratification)) +
-        ggplot2::geom_tile(color = "white", linewidth = 1, height = 0.8) +
-        ggplot2::scale_fill_viridis_d(name = "Stratification") +
-        ggplot2::labs(title = "Completed Metrics Summary",
-                       subtitle = paste0(nrow(summary_df), " metrics completed"),
-                       x = NULL, y = NULL) +
-        ggplot2::theme_minimal() +
-        ggplot2::theme(axis.text.y = ggplot2::element_blank(),
-                       axis.ticks.y = ggplot2::element_blank(),
-                       axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
-                       panel.grid = ggplot2::element_blank())
-    })
-
-    output$dl_summary_graphic <- downloadHandler(
-      filename = function() paste0("summary_graphic_", format(Sys.time(), "%Y%m%d"), ".png"),
+    output$dl_thresholds <- downloadHandler(
+      filename = function() "reference_curve_thresholds.csv",
       content = function(file) {
-        completed <- rv$completed_metrics
-        std <- purrr::keep(completed, ~ is.null(.x$type) || .x$type != "regional")
-        if (length(std) == 0) return()
-        summary_df <- purrr::map_dfr(names(std), function(mk) {
-          entry <- std[[mk]]
-          strat <- if (!is.null(entry$strat_decision) &&
-                       entry$strat_decision$decision_type == "single") {
-            entry$strat_decision$selected_strat
-          } else { "None" }
-          tibble::tibble(metric = rv$metric_config[[mk]]$display_name %||% mk,
-                         stratification = strat)
-        })
-        p <- ggplot2::ggplot(summary_df, ggplot2::aes(x = metric, y = 1, fill = stratification)) +
-          ggplot2::geom_tile(color = "white", linewidth = 1, height = 0.8) +
-          ggplot2::scale_fill_viridis_d(name = "Stratification") +
-          ggplot2::labs(title = "Completed Metrics Summary", x = NULL, y = NULL) +
-          ggplot2::theme_minimal() +
-          ggplot2::theme(axis.text.y = ggplot2::element_blank(),
-                         axis.ticks.y = ggplot2::element_blank(),
-                         axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
-                         panel.grid = ggplot2::element_blank())
-        ggplot2::ggsave(file, p, width = 12, height = 4, dpi = 300)
+        staged <- stage_exports()
+        summary_export_copy_file(staged$files$thresholds, file)
       }
     )
 
-    ## ── Cross-metric analysis ───────────────────────────────────────────────
-    cross_results <- reactiveVal(NULL)
-
-    observeEvent(input$run_cross, {
-      result <- run_cross_metric_analysis(rv$data, rv$metric_config)
-      cross_results(result)
-    })
-
-    output$cross_ui <- renderUI({
-      res <- cross_results()
-      req(res)
-      tagList(
-        if (!is.null(res$plots$correlation_heatmap)) {
-          card(class = "mt-3", card_header("Correlation Heatmap"),
-               card_body(plotOutput(ns("cross_heatmap"), height = "500px")))
-        },
-        if (nrow(res$results) > 0) {
-          redundant <- res$results |> dplyr::filter(redundant_flag == TRUE)
-          if (nrow(redundant) > 0) {
-            card(class = "mt-3", card_header("Redundancy Flags (|r| > 0.80)"),
-                 card_body(DT::DTOutput(ns("redundancy_table"))))
-          }
-        },
-        if (!is.null(res$plots$pca_biplot)) {
-          card(class = "mt-3", card_header("PCA Biplot"),
-               card_body(plotOutput(ns("pca_plot"), height = "450px")))
-        }
-      )
-    })
-
-    output$cross_heatmap <- renderPlot({
-      res <- cross_results()
-      req(res, !is.null(res$plots$correlation_heatmap))
-      res$plots$correlation_heatmap
-    })
-
-    output$redundancy_table <- DT::renderDT({
-      res <- cross_results()
-      req(res)
-      redundant <- res$results |>
-        dplyr::filter(redundant_flag == TRUE) |>
-        dplyr::select(display_1, display_2, pearson_r, spearman_rho) |>
-        dplyr::mutate(pearson_r = round(pearson_r, 3), spearman_rho = round(spearman_rho, 3))
-      DT::datatable(redundant, options = list(dom = "t", paging = FALSE),
-                     rownames = FALSE, class = "compact stripe")
-    })
-
-    output$pca_plot <- renderPlot({
-      res <- cross_results()
-      req(res, !is.null(res$plots$pca_biplot))
-      res$plots$pca_biplot
-    })
-
-    ## ════════════════════════════════════════════════════════════════════════
-    ## Pill 2: Export
-    ## ════════════════════════════════════════════════════════════════════════
-
-    standard_metrics <- reactive({
-      purrr::keep(rv$completed_metrics, ~ is.null(.x$type) || .x$type != "regional")
-    })
-    regional_metrics <- reactive({
-      purrr::keep(rv$completed_metrics, ~ !is.null(.x$type) && .x$type == "regional")
-    })
-
-    output$dl_thresholds <- downloadHandler(
-      filename = function() paste0("reference_thresholds_", format(Sys.time(), "%Y%m%d"), ".csv"),
+    output$dl_metric_status <- downloadHandler(
+      filename = function() "metric_status.csv",
       content = function(file) {
-        std <- standard_metrics()
-        if (length(std) == 0) { write.csv(data.frame(message = "No completed metrics"), file, row.names = FALSE); return() }
-        rows <- dplyr::bind_rows(lapply(std, function(e) if (!is.null(e$reference_curve)) e$reference_curve$curve_row else NULL))
-        write.csv(rows, file, row.names = FALSE)
-      })
+        staged <- stage_exports()
+        summary_export_copy_file(staged$files$metric_status, file)
+      }
+    )
 
     output$dl_strat <- downloadHandler(
-      filename = function() paste0("strat_decisions_", format(Sys.time(), "%Y%m%d"), ".csv"),
+      filename = function() "stratification_decisions.csv",
       content = function(file) {
-        std <- standard_metrics()
-        if (length(std) == 0) { write.csv(data.frame(message = "No completed metrics"), file, row.names = FALSE); return() }
-        rows <- dplyr::bind_rows(lapply(std, function(e) e$strat_decision))
-        write.csv(rows, file, row.names = FALSE)
-      })
+        staged <- stage_exports()
+        summary_export_copy_file(staged$files$stratification_decisions, file)
+      }
+    )
+
+    output$dl_decision_history <- downloadHandler(
+      filename = function() "decision_history.csv",
+      content = function(file) {
+        staged <- stage_exports()
+        summary_export_copy_file(staged$files$decision_history, file)
+      }
+    )
 
     output$dl_regional <- downloadHandler(
-      filename = function() paste0("regional_curves_", format(Sys.time(), "%Y%m%d"), ".csv"),
+      filename = function() "regional_curves.csv",
       content = function(file) {
-        reg <- regional_metrics()
-        if (length(reg) == 0) { write.csv(data.frame(message = "No completed regional curves"), file, row.names = FALSE); return() }
-        rows <- dplyr::bind_rows(lapply(reg, function(e) e$model_summary))
-        write.csv(rows, file, row.names = FALSE)
-      })
-
-    output$dl_decision_log <- downloadHandler(
-      filename = function() paste0("decision_log_", format(Sys.time(), "%Y%m%d"), ".csv"),
-      content = function(file) {
-        log <- rv$decision_log
-        if (is.null(log) || nrow(log) == 0) {
-          write.csv(data.frame(message = "No decisions recorded"), file, row.names = FALSE)
-        } else { write.csv(log, file, row.names = FALSE) }
-      })
+        staged <- stage_exports()
+        summary_export_copy_file(staged$files$regional_curves, file)
+      }
+    )
 
     output$dl_bundle <- downloadHandler(
-      filename = function() paste0("results_bundle_", format(Sys.time(), "%Y%m%d"), ".zip"),
+      filename = function() "results_bundle.zip",
       content = function(file) {
-        tmpdir <- tempdir()
-        bundle_dir <- file.path(tmpdir, "analysis_results")
-        dir.create(bundle_dir, showWarnings = FALSE, recursive = TRUE)
+        staged <- stage_exports()
+        summary_export_zip_dir(staged$bundle_dir, file)
+      }
+    )
 
-        std <- standard_metrics()
-        reg <- regional_metrics()
+    render_report_download("summary", "reports/summary.qmd", "pdf", "dl_summary_report")
+    render_report_download("dashboard", "reports/dashboard.qmd", "html", "dl_dashboard_report")
+    render_report_download(
+      "appendix",
+      "reports/appendix.qmd",
+      "pdf",
+      "dl_appendix_report",
+      include_appendix_plots = TRUE
+    )
 
-        if (length(std) > 0) {
-          thresholds <- dplyr::bind_rows(lapply(std, function(e) if (!is.null(e$reference_curve)) e$reference_curve$curve_row else NULL))
-          write.csv(thresholds, file.path(bundle_dir, "reference_thresholds.csv"), row.names = FALSE)
-          strat_decs <- dplyr::bind_rows(lapply(std, function(e) e$strat_decision))
-          write.csv(strat_decs, file.path(bundle_dir, "strat_decisions.csv"), row.names = FALSE)
-        }
-        if (length(reg) > 0) {
-          reg_rows <- dplyr::bind_rows(lapply(reg, function(e) e$model_summary))
-          write.csv(reg_rows, file.path(bundle_dir, "regional_curves.csv"), row.names = FALSE)
-        }
+    output$summary_page <- renderUI({
+      if (is.null(rv$data)) {
+        return(no_data_alert())
+      }
 
-        log <- rv$decision_log
-        if (!is.null(log) && nrow(log) > 0) {
-          write.csv(log, file.path(bundle_dir, "decision_log.csv"), row.names = FALSE)
-        }
+      ctx <- export_context()
+      status_cards <- list(
+        export_stat_card("Summary metrics", ctx$session_meta$metric_count),
+        export_stat_card("Curves ready", ctx$session_meta$complete_metrics),
+        export_stat_card("Needs review", ctx$session_meta$review_metrics),
+        export_stat_card("Manual curves", ctx$session_meta$manual_curve_metrics),
+        export_stat_card(
+          "Regional curves",
+          ctx$session_meta$regional_curve_sets,
+          if (ctx$session_meta$regional_curve_sets > 0) {
+            paste(ctx$session_meta$regional_curve_rows, "rows available")
+          } else {
+            "No regional outputs in this session"
+          }
+        )
+      )
 
-        writeLines(capture.output(sessionInfo()), file.path(bundle_dir, "session_info.txt"))
-        writeLines(c(
-          paste0("Analysis Results - ", Sys.time()),
-          paste0("Standard metrics completed: ", length(std)),
-          paste0("Regional curves completed: ", length(reg)),
-          paste0("Decision log entries: ", if (!is.null(log)) nrow(log) else 0),
-          paste0("Metrics: ", paste(names(rv$completed_metrics), collapse = ", "))
-        ), file.path(bundle_dir, "summary.txt"))
-
-        old_wd <- setwd(tmpdir)
-        on.exit(setwd(old_wd))
-        zip(file, files = list.files("analysis_results", full.names = TRUE, recursive = TRUE))
-      })
-
-    ## Quarto reports
-    report_msg <- reactiveVal(NULL)
-
-    observeEvent(input$gen_summary_pdf, {
-      report_path <- file.path(project_root, "reports", "summary.qmd")
-      if (!file.exists(report_path)) { report_msg("Summary template not found."); return() }
-      tryCatch({ quarto::quarto_render(report_path, output_format = "pdf"); report_msg("PDF summary generated successfully.") },
-               error = function(e) report_msg(paste0("Failed: ", e$message)))
-    })
-
-    observeEvent(input$gen_dashboard, {
-      report_path <- file.path(project_root, "reports", "dashboard.qmd")
-      if (!file.exists(report_path)) { report_msg("Dashboard template not found."); return() }
-      tryCatch({ quarto::quarto_render(report_path, output_format = "html"); report_msg("HTML dashboard generated.") },
-               error = function(e) report_msg(paste0("Failed: ", e$message)))
-    })
-
-    observeEvent(input$gen_appendix, {
-      report_path <- file.path(project_root, "reports", "appendix.qmd")
-      if (!file.exists(report_path)) { report_msg("Appendix template not found."); return() }
-      tryCatch({ quarto::quarto_render(report_path, output_format = "pdf"); report_msg("Full appendix generated.") },
-               error = function(e) report_msg(paste0("Failed: ", e$message)))
-    })
-
-    output$report_status <- renderUI({
-      msg <- report_msg()
-      if (is.null(msg)) return(NULL)
-      div(class = "alert alert-info mt-2", msg)
-    })
-
-    ## ════════════════════════════════════════════════════════════════════════
-    ## Pill 3: Details (Appendix)
-    ## ════════════════════════════════════════════════════════════════════════
-
-    ## All screening results
-    output$all_screening_table <- DT::renderDT({
-      all_l1 <- rv$all_layer1_results
-      if (length(all_l1) == 0) {
-        return(DT::datatable(
-          data.frame(message = "No screening results yet."),
-          options = list(dom = "t"), rownames = FALSE
+      core_cards <- list()
+      if (summary_export_output_enabled(rv, "thresholds")) {
+        core_cards <- c(core_cards, list(
+          export_download_card(
+            "Reference Curve Thresholds",
+            "CSV of current Phase 4 curve rows, including stratified and manual curves.",
+            downloadButton(ns("dl_thresholds"), "Download CSV", class = "btn btn-outline-primary")
+          )
+        ))
+      }
+      if (summary_export_output_enabled(rv, "metric_status")) {
+        core_cards <- c(core_cards, list(
+          export_download_card(
+            "Metric Status",
+            "CSV of current status, curve stratification, warnings, and manual-curve flags for each summary metric.",
+            downloadButton(ns("dl_metric_status"), "Download CSV", class = "btn btn-outline-primary")
+          )
+        ))
+      }
+      if (summary_export_output_enabled(rv, "stratification_decisions")) {
+        core_cards <- c(core_cards, list(
+          export_download_card(
+            "Stratification Decisions",
+            "CSV of the current selected and recommended curve stratification for each summary metric.",
+            downloadButton(ns("dl_strat"), "Download CSV", class = "btn btn-outline-primary")
+          )
+        ))
+      }
+      if (summary_export_output_enabled(rv, "results_bundle")) {
+        core_cards <- c(core_cards, list(
+          export_download_card(
+            "Full Results Bundle",
+            "ZIP bundle of the current session exports, report context, metadata, and optional regional/history files.",
+            downloadButton(ns("dl_bundle"), "Download ZIP", class = "btn btn-primary")
+          )
         ))
       }
 
-      combined <- dplyr::bind_rows(all_l1) |>
-        dplyr::mutate(
-          metric_display = sapply(metric, function(mk) rv$metric_config[[mk]]$display_name %||% mk),
-          strat_display = sapply(stratification, function(sk) rv$strat_config[[sk]]$display_name %||% sk),
-          statistic = round(statistic, 3),
-          p_value = round(p_value, 4)
-        ) |>
-        dplyr::select(
-          Metric = metric_display, Stratification = strat_display,
-          Test = test, Statistic = statistic, `p-value` = p_value,
-          Groups = n_groups, `Min n` = min_group_n, Classification = classification
-        )
+      report_cards <- list()
+      if (summary_export_report_enabled(rv, "summary")) {
+        report_cards <- c(report_cards, list(
+          export_download_card(
+            "PDF Summary",
+            "Compact executive snapshot of current metric status, exceptions, and curve outputs.",
+            downloadButton(ns("dl_summary_report"), "Download PDF", class = "btn btn-outline-secondary")
+          )
+        ))
+      }
+      if (summary_export_report_enabled(rv, "dashboard")) {
+        report_cards <- c(report_cards, list(
+          export_download_card(
+            "HTML Dashboard",
+            "Analyst-facing current-state dashboard with filterable tables for metrics, thresholds, decisions, and Phase 2 outputs.",
+            downloadButton(ns("dl_dashboard_report"), "Download HTML", class = "btn btn-outline-secondary")
+          )
+        ))
+      }
+      if (summary_export_report_enabled(rv, "appendix")) {
+        report_cards <- c(report_cards, list(
+          export_download_card(
+            "Full PDF Appendix",
+            "Detailed per-metric reference-curve appendix with current threshold tables, notes, and curve plots.",
+            downloadButton(ns("dl_appendix_report"), "Download PDF", class = "btn btn-outline-secondary")
+          )
+        ))
+      }
 
-      DT::datatable(combined, options = list(pageLength = 25, scrollX = TRUE),
-                     rownames = FALSE, class = "compact stripe", filter = "top")
-    })
+      extra_cards <- list()
+      if (summary_export_output_enabled(rv, "regional_curves") && nrow(ctx$regional_curves) > 0) {
+        extra_cards <- c(extra_cards, list(
+          export_download_card(
+            "Regional Curves",
+            "CSV of current regional curve fits completed in this session.",
+            downloadButton(ns("dl_regional"), "Download CSV", class = "btn btn-outline-primary")
+          )
+        ))
+      }
+      if (summary_export_output_enabled(rv, "decision_history") && nrow(ctx$decision_history) > 0) {
+        extra_cards <- c(extra_cards, list(
+          export_download_card(
+            "Decision History",
+            "CSV of recorded user decisions. This is history only, not the authoritative current state.",
+            downloadButton(ns("dl_decision_history"), "Download CSV", class = "btn btn-outline-primary")
+          )
+        ))
+      }
 
-    ## Boxplot viewer
-    observe({
-      metric_choices <- names(rv$metric_config)
-      metric_choices <- metric_choices[sapply(metric_choices, function(mk) {
-        rv$metric_config[[mk]]$metric_family != "categorical"
-      })]
-      named_choices <- setNames(metric_choices, sapply(metric_choices, function(mk) {
-        rv$metric_config[[mk]]$display_name %||% mk
-      }))
-      updateSelectInput(session, "boxplot_metric", choices = named_choices)
-    })
-
-    observeEvent(input$boxplot_metric, {
-      req(input$boxplot_metric)
-      allowed <- get_metric_allowed_strats(rv, input$boxplot_metric)
-      named_strats <- setNames(allowed, sapply(allowed, function(sk) {
-        rv$strat_config[[sk]]$display_name %||% sk
-      }))
-      updateSelectInput(session, "boxplot_strat", choices = named_strats)
-    })
-
-    output$boxplot_output <- renderUI({
-      req(input$boxplot_metric, input$boxplot_strat)
-      plotOutput(ns("boxplot_render"), height = "500px")
-    })
-
-    output$boxplot_render <- renderPlot({
-      req(input$boxplot_metric, input$boxplot_strat)
-      res <- tryCatch(
-        screen_stratification(rv$data, input$boxplot_metric, input$boxplot_strat,
-                              rv$metric_config, rv$strat_config),
-        error = function(e) NULL
+      tagList(
+        explanation_card(
+          "Export",
+          tags$p("Download outputs and reports generated from the current Shiny session."),
+          tags$p("These exports no longer read legacy pipeline folders or ", tags$code("outputs/run_latest"), ".")
+        ),
+        card(
+          card_header("Session Status"),
+          card_body(
+            do.call(layout_column_wrap, c(list(width = 1 / 5), status_cards))
+          )
+        ),
+        if (length(core_cards) > 0) {
+          card(
+            card_header("Core Downloads"),
+            card_body(
+              do.call(layout_column_wrap, c(list(width = 1 / 2), core_cards))
+            )
+          )
+        },
+        if (length(report_cards) > 0) {
+          card(
+            card_header("Reports"),
+            card_body(
+              do.call(layout_column_wrap, c(list(width = 1 / 3), report_cards))
+            )
+          )
+        },
+        if (length(extra_cards) > 0) {
+          card(
+            card_header("Additional Exports"),
+            card_body(
+              do.call(layout_column_wrap, c(list(width = 1 / 2), extra_cards))
+            )
+          )
+        }
       )
-      if (!is.null(res) && !is.null(res$plot)) res$plot else NULL
-    })
-
-    ## Stratification registry
-    output$strat_registry_table <- DT::renderDT({
-      sc <- rv$strat_config
-      registry_df <- purrr::map_dfr(names(sc), function(sk) {
-        entry <- sc[[sk]]
-        tibble::tibble(
-          Key = sk,
-          `Display Name` = entry$display_name %||% sk,
-          Column = entry$column_name %||% "N/A",
-          Type = entry$type %||% "single",
-          `Min Group Size` = entry$min_group_size %||% 5,
-          Levels = paste(entry$levels %||% character(0), collapse = ", "),
-          Notes = entry$notes %||% ""
-        )
-      })
-      DT::datatable(registry_df, options = list(dom = "t", paging = FALSE, scrollX = TRUE),
-                     rownames = FALSE, class = "compact stripe")
     })
   })
 }

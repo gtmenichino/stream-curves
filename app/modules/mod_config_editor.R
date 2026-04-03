@@ -1379,32 +1379,69 @@ mod_config_editor_server <- function(id, rv, open_trigger = reactive(NULL),
         ))
       }
 
+      supported_summary_outputs <- c(
+        "thresholds",
+        "metric_status",
+        "stratification_decisions",
+        "decision_history",
+        "regional_curves",
+        "results_bundle"
+      )
+      summary_output_labels <- c(
+        thresholds = "Reference curve thresholds CSV",
+        metric_status = "Metric status CSV",
+        stratification_decisions = "Stratification decisions CSV",
+        decision_history = "Decision history CSV",
+        regional_curves = "Regional curves CSV",
+        results_bundle = "Results bundle ZIP"
+      )
+
       ## Summary outputs
       if (!is.null(oc$summary_outputs)) {
-        items <- lapply(names(oc$summary_outputs), function(ok) {
+        keys <- intersect(supported_summary_outputs, names(oc$summary_outputs))
+        items <- lapply(keys, function(ok) {
           o <- oc$summary_outputs[[ok]]
-          checkboxInput(ns(paste0("out_sum_", ok)), ok,
+          checkboxInput(ns(paste0("out_sum_", ok)), summary_output_labels[[ok]] %||% ok,
                         value = isTRUE(o$enabled))
         })
-        sections <- c(sections, list(
-          tags$h6("Summary Outputs"),
-          tagList(items),
-          tags$hr()
-        ))
+        if (length(items) > 0) {
+          sections <- c(sections, list(
+            tags$h6("Summary Outputs"),
+            tagList(items),
+            tags$hr()
+          ))
+        }
       }
+
+      supported_report_products <- c("summary", "dashboard", "appendix")
+      report_product_labels <- c(
+        summary = "PDF summary",
+        dashboard = "HTML dashboard",
+        appendix = "Full PDF appendix"
+      )
 
       ## Report products
       if (!is.null(oc$report_products)) {
-        items <- lapply(names(oc$report_products), function(ok) {
+        keys <- intersect(supported_report_products, names(oc$report_products))
+        items <- lapply(keys, function(ok) {
           o <- oc$report_products[[ok]]
-          label <- paste0(ok, " (Tier ", o$tier %||% "?", ", ", o$format %||% "?", ")")
+          label <- paste0(
+            report_product_labels[[ok]] %||% ok,
+            " (Tier ",
+            o$tier %||% "?",
+            ", ",
+            o$format %||% "?",
+            ")"
+          )
           checkboxInput(ns(paste0("out_rpt_", ok)), label,
                         value = isTRUE(o$enabled))
         })
-        sections <- c(sections, list(
-          tags$h6("Report Products"),
-          tagList(items)
-        ))
+        if (length(items) > 0) {
+          sections <- c(sections, list(
+            tags$h6("Report Products"),
+            tagList(items)
+          ))
+        }
       }
 
       tagList(sections)
@@ -1424,7 +1461,14 @@ mod_config_editor_server <- function(id, rv, open_trigger = reactive(NULL),
 
       ## Summary outputs
       if (!is.null(oc$summary_outputs)) {
-        for (ok in names(oc$summary_outputs)) {
+        for (ok in intersect(c(
+          "thresholds",
+          "metric_status",
+          "stratification_decisions",
+          "decision_history",
+          "regional_curves",
+          "results_bundle"
+        ), names(oc$summary_outputs))) {
           val <- input[[paste0("out_sum_", ok)]]
           if (!is.null(val)) oc$summary_outputs[[ok]]$enabled <- val
         }
@@ -1432,7 +1476,7 @@ mod_config_editor_server <- function(id, rv, open_trigger = reactive(NULL),
 
       ## Report products
       if (!is.null(oc$report_products)) {
-        for (ok in names(oc$report_products)) {
+        for (ok in intersect(c("summary", "dashboard", "appendix"), names(oc$report_products))) {
           val <- input[[paste0("out_rpt_", ok)]]
           if (!is.null(val)) oc$report_products[[ok]]$enabled <- val
         }

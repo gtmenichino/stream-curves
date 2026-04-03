@@ -97,7 +97,7 @@ mod_precheck_server <- function(id, rv) {
           x = paste0(mc$display_name, " (", mc$units, ")"),
           y = "Count"
         ) +
-        theme_minimal()
+        streamcurves_minimal_plot_theme()
     })
 
     output$quality_flags <- renderUI({

@@ -138,11 +138,10 @@ compute_strat_consistency <- function(all_layer1_results, all_layer2_results,
         x = "Stratification Variable",
         y = "Metric"
       ) +
-      ggplot2::theme_minimal() +
-      ggplot2::theme(
-        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, size = 9),
-        axis.text.y = ggplot2::element_text(size = 9),
-        panel.grid = ggplot2::element_blank()
+      streamcurves_minimal_plot_theme(
+        axis_text_x_angle = 45,
+        axis_text_x_hjust = 1,
+        panel_grid_blank = TRUE
       )
   }, error = function(e) {
     cli::cli_alert_warning("Heatmap plot failed: {e$message}")

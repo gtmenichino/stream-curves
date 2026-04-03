@@ -107,10 +107,9 @@ run_cross_metric_analysis <- function(data, metric_config, reference_registry = 
         title = "Cross-Metric Correlation Matrix (Pearson)",
         x = "", y = "", fill = "r"
       ) +
-      ggplot2::theme_minimal() +
-      ggplot2::theme(
-        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, size = 7),
-        axis.text.y = ggplot2::element_text(size = 7)
+      streamcurves_minimal_plot_theme(
+        axis_text_x_angle = 45,
+        axis_text_x_hjust = 1
       )
   }
 
@@ -161,7 +160,7 @@ run_cross_metric_analysis <- function(data, metric_config, reference_registry = 
           x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
           y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)")
         ) +
-        ggplot2::theme_minimal()
+        streamcurves_minimal_plot_theme()
     }
   }
 

@@ -11,15 +11,34 @@ mod_phase3_verification_ui <- function(id, dialog_mode = FALSE) {
   uiOutput(ns("phase3_page"))
 }
 
-mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog_mode = FALSE) {
+mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog_mode = FALSE, workspace_scope = "standalone") {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     prev_metric <- reactiveVal(NULL)
     verify_data <- reactiveVal(NULL)
     artifacts_loading <- reactiveVal(FALSE)
     artifacts_error <- reactiveVal(NULL)
+    workspace_scope <- match.arg(workspace_scope, c("standalone", "analysis"))
+
+    phase3_workspace_active <- function(isolate_state = FALSE) {
+      if (!isTRUE(dialog_mode)) {
+        return(TRUE)
+      }
+
+      workspace_scope_is_active(
+        rv,
+        workspace_scope = workspace_scope,
+        standalone_modal_type = "phase3",
+        isolate_state = isolate_state
+      )
+    }
 
     set_verify_state <- function(metric = rv$current_metric) {
+      if (!isTRUE(phase3_workspace_active(isolate_state = TRUE))) {
+        verify_data(NULL)
+        return(invisible(NULL))
+      }
+
       if (is.null(metric) || identical(metric, "")) {
         verify_data(NULL)
         return(invisible(NULL))
@@ -29,7 +48,34 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
       invisible(NULL)
     }
 
-    refresh_verify_artifacts <- function(metric = rv$current_metric, defer = FALSE) {
+    sync_analysis_tab_state <- function(status = NULL, request_id = NULL, complete = FALSE) {
+      request_id <- request_id %||% shiny::isolate(rv$analysis_tab_request_id %||% NULL)
+      if (!isTRUE(dialog_mode) ||
+          !identical(workspace_scope, "analysis") ||
+          !isTRUE(phase3_workspace_active(isolate_state = TRUE)) ||
+          !analysis_tab_request_is_current(rv, request_id)) {
+        return(invisible(NULL))
+      }
+
+      resolved_status <- status %||% if (is.null(artifacts_error()) || !nzchar(artifacts_error() %||% "")) {
+        "ready"
+      } else {
+        "error"
+      }
+
+      set_analysis_tab_status(rv, "verification", resolved_status, request_id)
+      if (isTRUE(complete)) {
+        complete_analysis_tab_preload(rv, "verification", resolved_status, request_id)
+      }
+
+      invisible(resolved_status)
+    }
+
+    refresh_verify_artifacts <- function(metric = rv$current_metric, defer = FALSE, show_progress = TRUE) {
+      if (!isTRUE(phase3_workspace_active(isolate_state = TRUE))) {
+        return(invisible(FALSE))
+      }
+
       needs_phase1 <- metric_needs_phase1_artifact_refresh(rv, metric)
       needs_phase3 <- metric_needs_phase3_artifact_refresh(rv, metric)
 
@@ -71,17 +117,19 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
           shiny::isolate(run_refresh())
           invisible(NULL)
         }, once = TRUE)
-      } else {
-        withProgress(message = "Loading Phase 3 workspace...", value = 0, {
+      } else if (isTRUE(show_progress)) {
+        withProgress(message = "Loading verification workspace...", value = 0, {
           if (isTRUE(needs_phase1)) {
-            incProgress(0, detail = "Regenerating Phase 1 boxplots...")
+            incProgress(0, detail = "Regenerating exploratory boxplots...")
           }
           if (isTRUE(needs_phase3)) {
-            incProgress(0, detail = "Regenerating Phase 3 verification outputs...")
+            incProgress(0, detail = "Regenerating verification outputs...")
           }
           run_refresh()
           incProgress(1)
         })
+      } else {
+        run_refresh()
       }
 
       invisible(TRUE)
@@ -89,18 +137,23 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
 
     ## ── Data gate: show alert or full page ────────────────────────────────────
     output$phase3_page <- renderUI({
+      if (!isTRUE(phase3_workspace_active())) {
+        return(NULL)
+      }
+
       if (is.null(rv$data)) return(no_data_alert())
 
       if (isTRUE(dialog_mode)) {
         return(div(
           class = "workspace-phase-body",
           explanation_card(
-            "Phase 3: Final Stratification Verification",
+            "Verification",
             p("Does the top candidate stratification hold up under focused review?"),
             p("Verify finalist stratifications through pattern stability (LOESS),
-               feasibility assessment (sample sizes), and interpretability. Then
-               confirm your selection to carry forward into Phase 4."),
-            p(tags$strong("Requires:"), " Phase 1 completed for this metric.")
+               feasibility assessment (sample sizes), and interpretability. Use
+               this tab to review diagnostics before choosing the final curve
+               stratification on the Reference Curves tab."),
+            p(tags$strong("Requires:"), " Exploratory screening completed for this metric.")
           ),
           uiOutput(ns("metric_info_brief")),
           uiOutput(ns("artifact_status")),
@@ -112,7 +165,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
         ## ── Sidebar ─────────────────────────────────────────────────────────────
         sidebar = sidebar(
           width = 280,
-          title = "Phase 3: Verify",
+          title = "Verification",
           uiOutput(ns("metric_picker")),
           uiOutput(ns("metric_info_brief"))
         ),
@@ -120,12 +173,13 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
         ## ── Main content ────────────────────────────────────────────────────────
         tagList(
           explanation_card(
-            "Phase 3: Final Stratification Verification",
+            "Verification",
             p("Does the top candidate stratification hold up under focused review?"),
             p("Verify finalist stratifications through pattern stability (LOESS),
-               feasibility assessment (sample sizes), and interpretability. Then
-               confirm your selection to carry forward into Phase 4."),
-            p(tags$strong("Requires:"), " Phase 1 completed for this metric.")
+               feasibility assessment (sample sizes), and interpretability. Use
+               this tab to review diagnostics before choosing the final curve
+               stratification on the Reference Curves tab."),
+            p(tags$strong("Requires:"), " Exploratory screening completed for this metric.")
           ),
 
           uiOutput(ns("artifact_status")),
@@ -133,6 +187,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
         )
       )
     })
+    outputOptions(output, "phase3_page", suspendWhenHidden = FALSE)
 
     ## ── Metric picker ─────────────────────────────────────────────────────────
     output$metric_picker <- renderUI({
@@ -171,13 +226,35 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
     }, ignoreInit = TRUE)
 
     observeEvent(rv$workspace_modal_ready_nonce, {
-      if (isTRUE(dialog_mode) && identical(rv$workspace_modal_type, "phase3")) {
+      if (isTRUE(dialog_mode) && isTRUE(phase3_workspace_active())) {
         modal_metric <- rv$workspace_modal_metric %||% rv$current_metric
         if (is.null(modal_metric) || identical(modal_metric, "")) return(invisible(NULL))
         artifacts_loading(FALSE)
         artifacts_error(NULL)
         set_verify_state(modal_metric)
       }
+    }, ignoreInit = TRUE)
+
+    observeEvent(rv$analysis_tab_preload_nonce, {
+      if (!isTRUE(dialog_mode) ||
+          !identical(workspace_scope, "analysis") ||
+          !isTRUE(phase3_workspace_active()) ||
+          !identical(rv$analysis_tab_preload_tab %||% NULL, "verification")) {
+        return(invisible(NULL))
+      }
+
+      request_id <- rv$analysis_tab_request_id %||% NULL
+      modal_metric <- rv$workspace_modal_metric %||% rv$current_metric
+      if (is.null(modal_metric) || identical(modal_metric, "") ||
+          !analysis_tab_request_is_current(rv, request_id)) {
+        return(invisible(NULL))
+      }
+
+      artifacts_loading(FALSE)
+      artifacts_error(NULL)
+      set_verify_state(modal_metric)
+      refresh_verify_artifacts(modal_metric, defer = FALSE, show_progress = FALSE)
+      sync_analysis_tab_state(request_id = request_id, complete = TRUE)
     }, ignoreInit = TRUE)
 
     output$artifact_status <- renderUI({
@@ -188,14 +265,14 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
         return(div(
           class = "alert alert-info d-flex align-items-center gap-2",
           icon("spinner", class = "fa-spin"),
-          tags$span("Loading full Phase 3 details. Finalist selections are ready while verification plots and tables regenerate.")
+          tags$span("Loading full verification details. Finalist selections are ready while verification plots and tables regenerate.")
         ))
       }
 
       if (!is.null(error_text) && nzchar(error_text)) {
         return(div(
           class = "alert alert-danger d-flex justify-content-between align-items-center flex-wrap gap-2",
-          tags$span(paste0("Could not load full Phase 3 details: ", error_text)),
+          tags$span(paste0("Could not load full verification details: ", error_text)),
           actionButton(
             ns("retry_artifacts"),
             "Retry details",
@@ -209,6 +286,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
 
     observeEvent(input$retry_artifacts, {
       refresh_verify_artifacts(rv$current_metric, defer = FALSE)
+      sync_analysis_tab_state()
     }, ignoreInit = TRUE)
 
     ## Brief metric info
@@ -272,8 +350,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
         return(div(
           class = "alert alert-info mt-3",
           icon("info-circle"),
-          " No finalist stratifications found. Complete Phase 1 for this metric first,
-            and mark at least one stratification as Promising or Possible."
+          " No verification candidates are available yet. Complete exploratory screening for this metric first."
         ))
       }
 
@@ -367,11 +444,22 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
       rv$metric_phase_cache[[rv$current_metric]]$phase3_feasibility <- rv$phase3_feasibility
       rv$metric_phase_cache[[rv$current_metric]]$phase3_artifact_mode <- "full"
 
+      rv$phase3_verification[[rv$current_metric]] <- list(
+        finalists = checked_strats,
+        pattern_results = rv$phase3_patterns,
+        feasibility_results = rv$phase3_feasibility,
+        verification_status = stats::setNames(rep("reviewed", length(checked_strats)), checked_strats),
+        selected_strat = get_metric_curve_stratification(rv, rv$current_metric),
+        justification = ""
+      )
+
       verify_data(list(
         strats = checked_strats,
         patterns = rv$phase3_patterns,
         feasibility = rv$phase3_feasibility
       ))
+
+      notify_workspace_refresh(rv)
     })
 
     ## ── Verification results UI ───────────────────────────────────────────────
@@ -379,8 +467,18 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
       vd <- verify_data()
       if (is.null(vd)) return(NULL)
 
+      current_choice <- get_metric_curve_stratification(rv, rv$current_metric)
+      current_label <- get_metric_curve_strat_label(rv, rv$current_metric, current_choice)
+
       tagList(
-        ## Part A: Focused boxplots
+        card(
+          class = "border-info mb-3",
+          card_header("Reference Curve Selection"),
+          card_body(
+            p(class = "mb-2", paste0("Current stratification used for curves: ", current_label)),
+            p(class = "text-muted mb-0", "Use the Reference Curves tab to change the final curve stratification. This verification tab is advisory only.")
+          )
+        ),
         if (!is.null(rv$phase1_screening) && length(rv$phase1_screening$plots) > 0) {
           finalist_plots <- rv$phase1_screening$plots[
             intersect(names(rv$phase1_screening$plots), vd$strats)]
@@ -388,7 +486,7 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
             do.call(
               navset_card_tab,
               c(
-                list(title = "Part A: Focused Boxplots"),
+                list(title = "Focused Boxplots"),
                 lapply(names(finalist_plots), function(sk) {
                   nav_panel(
                     title = rv$strat_config[[sk]]$display_name %||% sk,
@@ -399,56 +497,43 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
             )
           }
         },
-
-        ## Part B: Pattern Stability
         if (!is.null(vd$patterns) && nrow(vd$patterns$results) > 0) {
           tagList(
             card(
-              card_header("Part B: Pattern Stability"),
+              card_header("Pattern Stability"),
               card_body(DT::DTOutput(ns("pattern_table")))
             ),
             if (length(vd$patterns$plots) > 0) {
               card(
                 card_header("Pattern Scatterplots"),
                 card_body(
-                  selectInput(ns("pattern_plot_select"), "Select plot:",
-                              choices = names(vd$patterns$plots), width = "400px"),
+                  shinyWidgets::pickerInput(
+                    ns("pattern_plot_select"),
+                    "Select plot:",
+                    choices = names(vd$patterns$plots),
+                    selected = names(vd$patterns$plots)[1],
+                    multiple = FALSE,
+                    width = "400px",
+                    options = shinyWidgets::pickerOptions(
+                      container = ".modal-dialog.workspace-modal-dialog",
+                      size = 8,
+                      liveSearch = TRUE
+                    )
+                  ),
                   plotOutput(ns("pattern_plot"), height = "400px")
                 )
               )
-            },
-            ## Pattern quality scoring
-            card(
-              card_header("Pattern Quality Scoring"),
-              card_body(
-                lapply(vd$strats, function(sk) {
-                  sc <- rv$strat_config[[sk]]
-                  div(
-                    class = "d-flex align-items-center gap-3 mb-2",
-                    tags$strong(sc$display_name %||% sk, style = "min-width: 200px;"),
-                    radioButtons(
-                      ns(paste0("pattern_score_", sk)), NULL,
-                      choices = c("Strong" = "strong", "Acceptable" = "acceptable",
-                                  "Weak" = "weak", "Reject" = "reject"),
-                      selected = "acceptable",
-                      inline = TRUE
-                    )
-                  )
-                })
-              )
-            )
+            }
           )
         },
-
-        ## Part C: Feasibility Assessment
         if (!is.null(vd$feasibility) && nrow(vd$feasibility) > 0) {
           tagList(
             card(
-              card_header("Part C: Feasibility Assessment"),
+              card_header("Feasibility Assessment"),
               card_body(DT::DTOutput(ns("feas_table")))
             ),
             card(
-              card_header("Qualitative Assessment"),
+              card_header("Diagnostic Summary"),
               card_body(
                 lapply(vd$strats, function(sk) {
                   sc <- rv$strat_config[[sk]]
@@ -456,126 +541,23 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
                   auto_flag <- if (nrow(feas_row) > 0) feas_row$feasibility_flag[1] else "unknown"
 
                   div(
-                    class = "mb-3 p-3 border rounded",
-                    tags$h6(sc$display_name %||% sk,
-                            status_badge(
-                              switch(auto_flag,
-                                feasible = "pass", marginal = "caution",
-                                infeasible = "fail", "not_applicable"),
-                              auto_flag
-                            )),
-                    checkboxGroupInput(
-                      ns(paste0("feas_checks_", sk)), NULL,
-                      choices = c(
-                        "Sample sizes adequate in each group" = "adequate_n",
-                        "Group boundaries understandable" = "clear_boundaries",
-                        "Stratification granularity appropriate" = "appropriate_grain",
-                        "Can be explained to method users" = "explainable",
-                        "Does not create too many final curves" = "manageable_curves"
+                    class = "d-flex align-items-center gap-3 mb-2",
+                    tags$strong(sc$display_name %||% sk, style = "min-width: 220px;"),
+                    status_badge(
+                      switch(auto_flag,
+                        feasible = "pass",
+                        marginal = "caution",
+                        infeasible = "fail",
+                        "not_applicable"
                       ),
-                      inline = FALSE
+                      auto_flag
                     )
                   )
                 })
               )
             )
           )
-        },
-
-        ## Part D: Interpretability
-        card(
-          card_header("Part D: Interpretability"),
-          card_body(
-            lapply(vd$strats, function(sk) {
-              sc <- rv$strat_config[[sk]]
-              div(
-                class = "mb-3 p-3 border rounded",
-                tags$h6(sc$display_name %||% sk),
-                radioButtons(
-                  ns(paste0("interp_eco_", sk)),
-                  "Ecologically defensible?",
-                  choices = c("Yes" = "yes", "No" = "no"),
-                  selected = "yes", inline = TRUE
-                ),
-                radioButtons(
-                  ns(paste0("interp_prac_", sk)),
-                  "Understandable to practitioners?",
-                  choices = c("Yes" = "yes", "No" = "no"),
-                  selected = "yes", inline = TRUE
-                ),
-                radioButtons(
-                  ns(paste0("interp_curves_", sk)),
-                  "Manageable number of curves?",
-                  choices = c("Yes" = "yes", "No" = "no"),
-                  selected = "yes", inline = TRUE
-                ),
-                bslib::accordion(
-                  bslib::accordion_panel(
-                    "Advanced Scoring (Likert)",
-                    sliderInput(ns(paste0("likert_eco_", sk)),
-                                "Ecological controls alignment:", 1, 5, 3, 1, width = "250px"),
-                    sliderInput(ns(paste0("likert_prac_", sk)),
-                                "Practitioner understanding:", 1, 5, 3, 1, width = "250px"),
-                    sliderInput(ns(paste0("likert_def_", sk)),
-                                "Defensible in documentation:", 1, 5, 3, 1, width = "250px"),
-                    sliderInput(ns(paste0("likert_interp_", sk)),
-                                "Curve interpretability:", 1, 5, 3, 1, width = "250px"),
-                    sliderInput(ns(paste0("likert_mgmt_", sk)),
-                                "Management utility:", 1, 5, 3, 1, width = "250px")
-                  ),
-                  open = FALSE
-                )
-              )
-            })
-          )
-        ),
-
-        ## Verification decision panel
-        card(
-          class = "border-primary",
-          card_header(class = "bg-primary text-white", "Verification Decision"),
-          card_body(
-            p(class = "text-muted", "Rate each finalist and select one for model building."),
-            lapply(vd$strats, function(sk) {
-              sc <- rv$strat_config[[sk]]
-              div(
-                class = "d-flex align-items-center gap-3 mb-2",
-                tags$strong(sc$display_name %||% sk, style = "min-width: 200px;"),
-                radioButtons(
-                  ns(paste0("verify_status_", sk)), NULL,
-                  choices = c("Verified" = "verified",
-                              "Verified-with-Caution" = "caution",
-                              "Not Recommended" = "not_recommended"),
-                  selected = "verified",
-                  inline = TRUE
-                )
-              )
-            }),
-            tags$hr(),
-            radioButtons(ns("final_strat_choice"), "Select stratification for Phase 4:",
-                         choices = c(
-                           setNames(vd$strats, sapply(vd$strats, function(sk) {
-                             rv$strat_config[[sk]]$display_name %||% sk
-                           })),
-                           "none" = "None \u2014 skip stratification"
-                         ),
-                         selected = {
-                           current_choice <- get_metric_phase3_selected(rv, rv$current_metric)
-                           if (current_choice %in% c(vd$strats, "none")) current_choice else vd$strats[1]
-                         }),
-            radioButtons(ns("strat_mode"), "Stratification mode:",
-                         choices = c("Covariate" = "covariate", "Subset" = "subset"),
-                         selected = "covariate", inline = TRUE),
-            textAreaInput(ns("justification"), "Justification (required):",
-                          placeholder = "Explain your stratification choice...",
-                          width = "100%", rows = 3),
-            div(
-              class = "d-flex justify-content-end mt-3",
-              actionButton(ns("confirm_phase3"), "Confirm and Proceed to Phase 4 \u25b8",
-                           class = "btn btn-primary btn-proceed")
-            )
-          )
-        )
+        }
       )
     })
 
@@ -583,15 +565,27 @@ mod_phase3_verification_server <- function(id, rv, parent_session = NULL, dialog
     observe({
       vd <- verify_data()
       req(vd)
-      if (!is.null(rv$phase1_screening) && length(rv$phase1_screening$plots) > 0) {
-        for (sk in vd$strats) {
-          local({
-            local_sk <- sk
-            output[[paste0("bp_", local_sk)]] <- renderPlot({
-              rv$phase1_screening$plots[[local_sk]]
-            })
+      for (sk in vd$strats) {
+        local({
+          local_sk <- sk
+          output[[paste0("bp_", local_sk)]] <- renderPlot({
+            phase1_state <- get_metric_phase1_display_state(rv, rv$current_metric)
+            req(phase1_state)
+
+            if (!is.null(phase1_state$plot_specs[[local_sk]])) {
+              return(build_screening_plot_from_spec(
+                phase1_state$plot_specs[[local_sk]],
+                rv$metric_config,
+                rv$strat_config,
+                font_profile = "large_analysis",
+                show_points = FALSE,
+                masked_site_ids = integer(0)
+              ))
+            }
+
+            phase1_state$plots[[local_sk]]
           })
-        }
+        })
       }
     })
 

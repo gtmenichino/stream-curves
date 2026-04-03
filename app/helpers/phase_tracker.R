@@ -5,10 +5,10 @@
 library(shiny)
 
 PHASE_LABELS <- c(
-  "Initial Exploration",       # Phase 1
-  "Cross-Metric Consistency",  # Phase 2
-  "Verification",              # Phase 3
-  "Reference Curve"            # Phase 4
+  "Exploratory",
+  "Cross-Metric Analysis",
+  "Verification",
+  "Reference Curves"
 )
 
 ## ── Per-phase state fields for save/restore across metric switches ────────────
@@ -182,6 +182,7 @@ reset_all_analysis <- function(rv) {
   rv$cross_metric_consistency   <- NULL
   rv$phase2_settings            <- empty_phase2_settings()
   rv$phase2_metric_overrides    <- list()
+  rv$curve_stratification       <- list()
   rv$summary_available_overrides <- list()
   rv$summary_edit_notes         <- list()
   rv$phase3_verification        <- list()
@@ -206,6 +207,8 @@ reset_app_to_startup <- function(rv) {
   rv$data                 <- NULL
   rv$qa_log               <- NULL
   rv$precheck_df          <- NULL
+  rv$input_metadata       <- NULL
+  rv$site_mask_config     <- NULL
   rv$data_source          <- NULL
   rv$data_fingerprint     <- NULL
   rv$upload_filename      <- NULL
@@ -218,18 +221,150 @@ reset_app_to_startup <- function(rv) {
 }
 
 
-launch_workspace_modal <- function(rv, phase, metric = NULL) {
+next_workspace_modal_request_id <- function(rv) {
+  isolate(rv$workspace_modal_nonce %||% 0L) + 1L
+}
+
+
+launch_workspace_modal <- function(rv, phase, metric = NULL, request_id = NULL) {
+  next_request_id <- request_id %||% next_workspace_modal_request_id(rv)
+
+  if (identical(phase, "analysis")) {
+    reset_analysis_tab_state(rv, next_request_id, default = "pending")
+  }
+
   rv$workspace_modal_type <- phase
   rv$workspace_modal_metric <- metric %||% rv$current_metric %||% NULL
   rv$workspace_modal_stage <- "loading"
   rv$workspace_modal_error <- NULL
   rv$workspace_modal_loading_detail <- NULL
-  rv$workspace_modal_nonce <- isolate(rv$workspace_modal_nonce %||% 0L) + 1L
-  invisible(NULL)
+  rv$workspace_modal_nonce <- next_request_id
+  invisible(next_request_id)
+}
+
+
+workspace_scope_is_active <- function(rv,
+                                      workspace_scope = c("standalone", "analysis"),
+                                      standalone_modal_type = NULL,
+                                      isolate_state = FALSE) {
+  workspace_scope <- match.arg(workspace_scope)
+
+  read_modal_type <- function() {
+    rv$workspace_modal_type %||% NULL
+  }
+
+  current_modal_type <- if (isTRUE(isolate_state)) {
+    shiny::isolate(read_modal_type())
+  } else {
+    read_modal_type()
+  }
+
+  if (identical(workspace_scope, "analysis")) {
+    return(identical(current_modal_type, "analysis"))
+  }
+
+  identical(current_modal_type, standalone_modal_type)
 }
 
 
 notify_workspace_refresh <- function(rv) {
   rv$workspace_refresh_nonce <- isolate(rv$workspace_refresh_nonce %||% 0L) + 1L
   invisible(NULL)
+}
+
+
+analysis_tab_keys <- function() {
+  c("exploratory", "cross_metric", "verification", "reference_curves")
+}
+
+
+analysis_tab_labels <- function() {
+  c(
+    exploratory = "Exploratory",
+    cross_metric = "Cross-Metric Analysis",
+    verification = "Verification",
+    reference_curves = "Reference Curves"
+  )
+}
+
+
+empty_analysis_tab_status <- function(default = "pending") {
+  stats::setNames(as.list(rep_len(default, length(analysis_tab_keys()))), analysis_tab_keys())
+}
+
+
+get_analysis_tab_status <- function(rv, tab = NULL) {
+  status <- shiny::isolate(rv$analysis_tab_status %||% empty_analysis_tab_status())
+  if (is.null(tab)) {
+    return(status)
+  }
+  status[[tab]] %||% "pending"
+}
+
+
+analysis_tab_request_is_current <- function(rv, request_id = NULL) {
+  request_id <- request_id %||% shiny::isolate(rv$analysis_tab_request_id %||% NULL)
+  identical(shiny::isolate(rv$analysis_tab_request_id %||% NULL), request_id)
+}
+
+
+reset_analysis_tab_state <- function(rv, request_id, default = "pending") {
+  status <- empty_analysis_tab_status(default)
+
+  rv$analysis_tab_request_id <- request_id
+  rv$analysis_tab_status <- status
+  rv$analysis_tab_status_nonce <- isolate(rv$analysis_tab_status_nonce %||% 0L) + 1L
+  rv$analysis_tab_preload_tab <- NULL
+  rv$analysis_tab_preload_nonce <- isolate(rv$analysis_tab_preload_nonce %||% 0L) + 1L
+  rv$analysis_tab_preload_completed_tab <- NULL
+  rv$analysis_tab_preload_completed_status <- NULL
+  rv$analysis_tab_preload_completed_nonce <- isolate(rv$analysis_tab_preload_completed_nonce %||% 0L) + 1L
+  invisible(status)
+}
+
+
+set_analysis_tab_status <- function(rv, tab, status, request_id = NULL) {
+  request_id <- request_id %||% shiny::isolate(rv$analysis_tab_request_id %||% NULL)
+  if (!(tab %in% analysis_tab_keys()) || !analysis_tab_request_is_current(rv, request_id)) {
+    return(invisible(FALSE))
+  }
+
+  current <- get_analysis_tab_status(rv)
+  if (identical(current[[tab]], status)) {
+    return(invisible(FALSE))
+  }
+
+  current[[tab]] <- status
+  rv$analysis_tab_status <- current
+  rv$analysis_tab_status_nonce <- isolate(rv$analysis_tab_status_nonce %||% 0L) + 1L
+  invisible(TRUE)
+}
+
+
+request_analysis_tab_preload <- function(rv, tab, request_id = NULL) {
+  request_id <- request_id %||% shiny::isolate(rv$analysis_tab_request_id %||% NULL)
+  if (!(tab %in% analysis_tab_keys()) || !analysis_tab_request_is_current(rv, request_id)) {
+    return(invisible(FALSE))
+  }
+
+  rv$analysis_tab_preload_tab <- tab
+  rv$analysis_tab_preload_nonce <- isolate(rv$analysis_tab_preload_nonce %||% 0L) + 1L
+  invisible(TRUE)
+}
+
+
+complete_analysis_tab_preload <- function(rv, tab, status = NULL, request_id = NULL) {
+  request_id <- request_id %||% shiny::isolate(rv$analysis_tab_request_id %||% NULL)
+  if (!(tab %in% analysis_tab_keys()) || !analysis_tab_request_is_current(rv, request_id)) {
+    return(invisible(FALSE))
+  }
+
+  if (!is.null(status)) {
+    set_analysis_tab_status(rv, tab, status, request_id)
+  }
+
+  rv$analysis_tab_preload_completed_tab <- tab
+  rv$analysis_tab_preload_completed_status <- status %||% get_analysis_tab_status(rv, tab)
+  rv$analysis_tab_preload_completed_nonce <- isolate(rv$analysis_tab_preload_completed_nonce %||% 0L) + 1L
+  invisible(TRUE)
 }

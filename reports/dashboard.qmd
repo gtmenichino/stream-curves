@@ -1,6 +1,6 @@
 ---
-title: "StreamCurves — Geomorphic Reference Curve Analysis"
-subtitle: "Interactive Dashboard"
+title: "StreamCurves - Current Session Dashboard"
+subtitle: "Interactive Export View"
 format:
   html:
     toc: true
@@ -8,205 +8,187 @@ format:
     theme: cosmo
     page-layout: full
     self-contained: true
-    code-fold: true
-    code-summary: "Show code"
 params:
-  run_dir: "../outputs/run_latest"
+  session_dir: null
 ---
 
 ```{r setup, include=FALSE}
-library(tidyverse)
-library(reactable)
+library(dplyr)
+library(DT)
 library(htmltools)
+library(tibble)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
-# Find most recent run directory if run_latest doesn't exist
-run_dir <- params$run_dir
-if (!dir.exists(run_dir)) {
-  all_runs <- list.dirs("../outputs", recursive = FALSE, full.names = TRUE)
-  all_runs <- sort(all_runs, decreasing = TRUE)
-  if (length(all_runs) > 0) {
-    run_dir <- all_runs[1]
-  }
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
 }
 
-tables_dir <- file.path(run_dir, "tables")
-plots_dir  <- file.path(run_dir, "plots")
-
-# Helper to safely read CSV
-safe_read <- function(path) {
-  if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE)
-  else tibble::tibble()
+if (is.null(params$session_dir) || !dir.exists(params$session_dir)) {
+  stop("A valid session_dir parameter is required.")
 }
-```
 
-## Overview {.tabset}
-
-### Overview
-
-**Run Directory:** `r run_dir`
-
-```{r overview}
-manifest_path <- file.path(run_dir, "manifest", "run_manifest.json")
-if (file.exists(manifest_path)) {
-  manifest <- jsonlite::read_json(manifest_path)
-  cat("Run ID:", manifest$run_id, "\n")
-  cat("Timestamp:", manifest$timestamp, "\n")
-  cat("R Version:", manifest$r_version, "\n")
+session_dir <- normalizePath(params$session_dir, winslash = "/", mustWork = TRUE)
+context_path <- file.path(session_dir, "report_context.rds")
+if (!file.exists(context_path)) {
+  stop("report_context.rds was not found in session_dir.")
 }
-```
 
-### Data QA
+ctx <- readRDS(context_path)
+session_meta <- ctx$session_meta %||% list()
+metric_status <- tibble::as_tibble(ctx$metric_status %||% tibble())
+thresholds <- tibble::as_tibble(ctx$threshold_rows %||% tibble())
+decisions <- tibble::as_tibble(ctx$current_decisions %||% tibble())
+phase2_summary <- tibble::as_tibble(ctx$phase2_summary %||% tibble())
+regional_curves <- tibble::as_tibble(ctx$regional_curves %||% tibble())
+decision_history <- tibble::as_tibble(ctx$decision_history %||% tibble())
 
-```{r data-qa}
-precheck <- safe_read(file.path(tables_dir, "metric_precheck.csv"))
-if (nrow(precheck) > 0) {
-  reactable::reactable(
-    precheck,
-    filterable = TRUE, searchable = TRUE, striped = TRUE,
-    defaultPageSize = 25,
-    columns = list(
-      precheck_status = colDef(
-        style = function(value) {
-          color <- switch(value, pass = "green", caution = "orange", fail = "red", "gray")
-          list(color = color, fontWeight = "bold")
-        }
-      )
+metric_status_table <- function(data) {
+  DT::datatable(
+    data,
+    rownames = FALSE,
+    filter = "top",
+    class = "compact stripe",
+    options = list(
+      pageLength = 15,
+      scrollX = TRUE,
+      autoWidth = TRUE
     )
   )
 }
 ```
 
-### Stratification
+## Overview
 
-```{r stratification}
-strat_results <- safe_read(file.path(tables_dir, "stratification_screening.csv"))
-if (nrow(strat_results) > 0) {
-  reactable::reactable(
-    strat_results,
-    filterable = TRUE, searchable = TRUE, striped = TRUE,
-    defaultPageSize = 25,
-    columns = list(
-      p_value = colDef(format = colFormat(digits = 4)),
-      classification = colDef(
-        style = function(value) {
-          color <- if (grepl("selected", value)) "green" else if (grepl("rejected", value)) "red" else "gray"
-          list(color = color, fontWeight = "bold")
-        }
-      )
-    )
+```{r overview, results='asis'}
+kpi_card <- function(title, value, detail = NULL) {
+  div(
+    style = "padding: 1rem; border: 1px solid #d9d9d9; border-radius: 0.75rem; background: #f8f9fa;",
+    tags$div(style = "font-size: 0.9rem; color: #666; margin-bottom: 0.25rem;", title),
+    tags$div(style = "font-size: 2rem; font-weight: 700; line-height: 1.1;", value),
+    if (!is.null(detail)) tags$div(style = "font-size: 0.85rem; color: #666; margin-top: 0.35rem;", detail)
+  )
+}
+
+browsable(
+  div(
+    style = "display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1rem;",
+    kpi_card("Generated", session_meta$generated_at %||% "Unknown"),
+    kpi_card("Summary Metrics", session_meta$metric_count %||% 0),
+    kpi_card("Curves Ready", session_meta$complete_metrics %||% 0),
+    kpi_card("Needs Review", session_meta$review_metrics %||% 0),
+    kpi_card("Manual Curves", session_meta$manual_curve_metrics %||% 0),
+    kpi_card("Regional Sets", session_meta$regional_curve_sets %||% 0)
+  )
+)
+```
+
+## Metric Status
+
+```{r metric-status}
+if (nrow(metric_status) == 0) {
+  cat("No summary metrics are available in the current session.")
+} else {
+  metric_status |>
+    select(
+      display_name,
+      status_label,
+      selected_curve_stratification_label,
+      recommended_curve_stratification_label,
+      curve_summary,
+      manual_curve_label,
+      warning_summary
+    ) |>
+    metric_status_table()
+}
+```
+
+## Reference Curve Thresholds
+
+```{r thresholds}
+if (nrow(thresholds) == 0) {
+  cat("No current reference-curve thresholds are available.")
+} else {
+  DT::datatable(
+    thresholds,
+    rownames = FALSE,
+    filter = "top",
+    class = "compact stripe",
+    options = list(pageLength = 15, scrollX = TRUE, autoWidth = TRUE)
   )
 }
 ```
 
-#### Stratification Decisions
+## Stratification Decisions
 
-```{r strat-decisions}
-strat_dec <- safe_read(file.path(tables_dir, "stratification_decisions.csv"))
-if (nrow(strat_dec) > 0) {
-  reactable::reactable(strat_dec, filterable = TRUE, striped = TRUE)
-}
-```
-
-### Model Selection
-
-```{r model-selection}
-model_sel <- safe_read(file.path(tables_dir, "model_selections.csv"))
-if (nrow(model_sel) > 0) {
-  reactable::reactable(
-    model_sel,
-    filterable = TRUE, searchable = TRUE, striped = TRUE,
-    columns = list(
-      adj_r2 = colDef(format = colFormat(digits = 3)),
-      bic = colDef(format = colFormat(digits = 1)),
-      needs_review = colDef(
-        style = function(value) {
-          if (isTRUE(value)) list(color = "orange", fontWeight = "bold")
-          else list()
-        }
-      )
+```{r decisions}
+if (nrow(decisions) == 0) {
+  cat("No current stratification decisions are available.")
+} else {
+  decision_tbl <- decisions |>
+    select(
+      display_name,
+      decision_type,
+      selected_curve_stratification_label,
+      recommended_curve_stratification_label,
+      status_label,
+      phase4_source,
+      manual_curve_label
     )
+
+  DT::datatable(
+    decision_tbl,
+    rownames = FALSE,
+    filter = "top",
+    class = "compact stripe",
+    options = list(pageLength = 15, scrollX = TRUE, autoWidth = TRUE)
   )
 }
 ```
 
-### Diagnostics
+## Phase 2 Summary
 
-```{r diagnostics}
-diag_summary <- safe_read(file.path(tables_dir, "diagnostic_summary.csv"))
-if (nrow(diag_summary) > 0) {
-  reactable::reactable(
-    diag_summary,
-    filterable = TRUE, searchable = TRUE, striped = TRUE,
-    columns = list(
-      overall_status = colDef(
-        style = function(value) {
-          color <- switch(value, pass = "green", caution = "orange", fail = "red", "gray")
-          list(color = color, fontWeight = "bold")
-        }
-      )
-    )
+```{r phase2}
+if (nrow(phase2_summary) == 0) {
+  cat("No current Phase 2 summary is available.")
+} else {
+  DT::datatable(
+    phase2_summary,
+    rownames = FALSE,
+    filter = "top",
+    class = "compact stripe",
+    options = list(pageLength = 15, scrollX = TRUE, autoWidth = TRUE)
   )
 }
 ```
 
-### Reference Curves
+## Regional Curves
 
-```{r reference-curves}
-ref_curves <- safe_read(file.path(tables_dir, "reference_curves.csv"))
-if (nrow(ref_curves) > 0) {
-  reactable::reactable(
-    ref_curves,
-    filterable = TRUE, searchable = TRUE, striped = TRUE,
-    columns = list(
-      q25 = colDef(format = colFormat(digits = 1)),
-      q75 = colDef(format = colFormat(digits = 1))
-    )
+```{r regional}
+if (nrow(regional_curves) == 0) {
+  cat("No regional curve outputs are available.")
+} else {
+  DT::datatable(
+    regional_curves,
+    rownames = FALSE,
+    filter = "top",
+    class = "compact stripe",
+    options = list(pageLength = 15, scrollX = TRUE, autoWidth = TRUE)
   )
 }
 ```
 
-### Cross-Metric
+## Decision History
 
-```{r cross-metric}
-redundancy <- safe_read(file.path(tables_dir, "metric_redundancy_results.csv"))
-if (nrow(redundancy) > 0) {
-  reactable::reactable(
-    redundancy |> dplyr::filter(abs_pearson > 0.5),
-    filterable = TRUE, searchable = TRUE, striped = TRUE,
-    columns = list(
-      pearson_r = colDef(format = colFormat(digits = 3)),
-      redundant_flag = colDef(
-        style = function(value) {
-          if (isTRUE(value)) list(color = "red", fontWeight = "bold") else list()
-        }
-      )
-    )
+```{r history}
+if (nrow(decision_history) == 0) {
+  cat("No decision history entries are available.")
+} else {
+  DT::datatable(
+    decision_history,
+    rownames = FALSE,
+    filter = "top",
+    class = "compact stripe",
+    options = list(pageLength = 15, scrollX = TRUE, autoWidth = TRUE)
   )
-}
-```
-
-### Regional Curves
-
-```{r regional-curves}
-regional <- safe_read(file.path(tables_dir, "regional_curves_results.csv"))
-if (nrow(regional) > 0) {
-  reactable::reactable(
-    regional,
-    filterable = TRUE, searchable = TRUE, striped = TRUE,
-    columns = list(
-      r_squared = colDef(format = colFormat(digits = 3)),
-      coefficient_a = colDef(format = colFormat(digits = 4)),
-      exponent_b = colDef(format = colFormat(digits = 3))
-    )
-  )
-}
-```
-
-### Run Info
-
-```{r run-info}
-log_df <- safe_read(file.path(run_dir, "logs", "pipeline_log.csv"))
-if (nrow(log_df) > 0) {
-  reactable::reactable(log_df, striped = TRUE)
 }
 ```

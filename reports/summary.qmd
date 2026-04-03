@@ -1,105 +1,116 @@
 ---
-title: "StreamCurves — Geomorphic Reference Curve Summary"
-subtitle: "Condensed Analysis Results"
+title: "StreamCurves - Export Summary"
+subtitle: "Current Session Snapshot"
 format:
   pdf:
     documentclass: article
     papersize: letter
     geometry:
       - margin=0.75in
-      - landscape
     keep-tex: false
-    fig-width: 9
-    fig-height: 5
 params:
-  run_dir: "../outputs/run_latest"
+  session_dir: null
 ---
 
 ```{r setup, include=FALSE}
-library(tidyverse)
+library(dplyr)
 library(gt)
+library(tibble)
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
-run_dir <- params$run_dir
-if (!dir.exists(run_dir)) {
-  all_runs <- list.dirs("../outputs", recursive = FALSE, full.names = TRUE)
-  all_runs <- sort(all_runs, decreasing = TRUE)
-  if (length(all_runs) > 0) run_dir <- all_runs[1]
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
 }
 
-tables_dir <- file.path(run_dir, "tables")
-safe_read <- function(path) {
-  if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE)
-  else tibble::tibble()
+if (is.null(params$session_dir) || !dir.exists(params$session_dir)) {
+  stop("A valid session_dir parameter is required.")
+}
+
+session_dir <- normalizePath(params$session_dir, winslash = "/", mustWork = TRUE)
+context_path <- file.path(session_dir, "report_context.rds")
+if (!file.exists(context_path)) {
+  stop("report_context.rds was not found in session_dir.")
+}
+
+ctx <- readRDS(context_path)
+session_meta <- ctx$session_meta %||% list()
+metric_status <- tibble::as_tibble(ctx$metric_status %||% tibble())
+regional_curves <- tibble::as_tibble(ctx$regional_curves %||% tibble())
+```
+
+# Session Overview
+
+- Generated: `r session_meta$generated_at %||% "Unknown"`
+- Summary metrics: `r session_meta$metric_count %||% 0`
+- Curves ready: `r session_meta$complete_metrics %||% 0`
+- Pending metrics: `r session_meta$pending_metrics %||% 0`
+- Metrics needing review: `r session_meta$review_metrics %||% 0`
+- Manual curve metrics: `r session_meta$manual_curve_metrics %||% 0`
+- Regional curve sets: `r session_meta$regional_curve_sets %||% 0`
+
+# Priority Review Items
+
+```{r review-items}
+review_items <- metric_status |>
+  filter((needs_review %in% TRUE) | status_label == "Incomplete") |>
+  select(
+    Metric = display_name,
+    Status = status_label,
+    `Selected Stratification` = selected_curve_stratification_label,
+    `Recommended Stratification` = recommended_curve_stratification_label,
+    `Manual Curve` = manual_curve_label,
+    Warnings = warning_summary
+  )
+
+if (nrow(review_items) == 0) {
+  cat("No metrics currently require review.")
+} else {
+  gt(review_items) |>
+    fmt_missing(columns = everything(), missing_text = "-") |>
+    tab_header(title = "Metrics Requiring Attention")
 }
 ```
 
-# Analysis Overview
+# Current Metric Status
 
-This report summarizes the geomorphic reference-curve analysis across three ecoregions (Region_A, Region_B, Region_C). The analysis covers `r nrow(safe_read(file.path(tables_dir, "metric_precheck.csv")))` stream metrics using the loaded dataset.
+```{r metric-status}
+status_tbl <- metric_status |>
+  select(
+    Metric = display_name,
+    Status = status_label,
+    `Selected Stratification` = selected_curve_stratification_label,
+    `Recommended Stratification` = recommended_curve_stratification_label,
+    `Curve Summary` = curve_summary,
+    `Manual Curve` = manual_curve_label
+  )
 
-## Key Results
+if (nrow(status_tbl) == 0) {
+  cat("No summary metrics are available in the current session.")
+} else {
+  gt(status_tbl) |>
+    fmt_missing(columns = everything(), missing_text = "-") |>
+    tab_header(title = "Current Summary-Metric State")
+}
+```
 
-```{r summary-table}
-model_sel <- safe_read(file.path(tables_dir, "model_selections.csv"))
-diag_summary <- safe_read(file.path(tables_dir, "diagnostic_summary.csv"))
-ref_curves <- safe_read(file.path(tables_dir, "reference_curves.csv"))
-strat_dec <- safe_read(file.path(tables_dir, "stratification_decisions.csv"))
+# Regional Outputs
 
-if (nrow(model_sel) > 0) {
-  summary <- model_sel |>
-    left_join(strat_dec |> select(metric, selected_strat), by = "metric") |>
-    left_join(diag_summary |> select(metric, overall_status), by = "metric") |>
-    left_join(ref_curves |> select(metric, display_name, q25, q75), by = "metric") |>
-    select(display_name, selected_strat, predictors, adj_r2,
-           overall_status, q25, q75, needs_review) |>
-    rename(
-      Metric = display_name,
-      Stratification = selected_strat,
-      Predictors = predictors,
-      `Adj R²` = adj_r2,
-      Diagnostics = overall_status,
-      Q25 = q25,
-      Q75 = q75,
-      Review = needs_review
+```{r regional-summary}
+if (nrow(regional_curves) == 0) {
+  cat("No regional curve outputs are available in the current session.")
+} else {
+  regional_tbl <- regional_curves |>
+    select(
+      Response = response,
+      Predictor = predictor,
+      Stratification = stratify,
+      `Fit Status` = fit_status,
+      `R Squared` = r_squared
     )
 
-  gt::gt(summary) |>
-    gt::fmt_number(columns = c(`Adj R²`), decimals = 3) |>
-    gt::fmt_number(columns = c(Q25, Q75), decimals = 1) |>
-    gt::tab_header(title = "Metric Analysis Summary") |>
-    gt::tab_footnote("IQR (Q25-Q75) defines the Functioning range (score 0.70-1.00)")
-}
-```
-
-## Scoring Categories
-
-| Category | Score Range | Description |
-|----------|-----------|-------------|
-| Functioning | 0.70 - 1.00 | Within IQR of reference-standard sites |
-| Functioning-at-Risk | 0.30 - 0.69 | Below/above reference IQR |
-| Not Functioning | 0.00 - 0.29 | Well outside reference range |
-
-## Diagnostics Summary
-
-```{r diagnostics-summary}
-if (nrow(diag_summary) > 0) {
-  cat("Pass:", sum(diag_summary$overall_status == "pass", na.rm = TRUE), "\n")
-  cat("Caution:", sum(diag_summary$overall_status == "caution", na.rm = TRUE), "\n")
-  cat("Fail:", sum(diag_summary$overall_status == "fail", na.rm = TRUE), "\n")
-}
-```
-
-## Metrics Requiring Review
-
-```{r review-flags}
-if (nrow(model_sel) > 0) {
-  review_items <- model_sel |> filter(needs_review == TRUE)
-  if (nrow(review_items) > 0) {
-    gt::gt(review_items |> select(metric, predictors, review_reason)) |>
-      gt::tab_header(title = "Metrics Flagged for Review")
-  } else {
-    cat("No metrics flagged for review.")
-  }
+  gt(regional_tbl) |>
+    fmt_number(columns = c(`R Squared`), decimals = 3) |>
+    fmt_missing(columns = everything(), missing_text = "-") |>
+    tab_header(title = "Regional Curve Snapshot")
 }
 ```

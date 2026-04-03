@@ -2,29 +2,29 @@
 ## run_all.R - Top-level entry point
 ##
 ## Usage:
-##   source("run_all.R")  # Run all metrics after setting csv_path below
+##   source("run_all.R")  # Run all metrics after setting input_path below
 ##   source("R/run_pipeline.R")
-##   run_pipeline(csv_path = "path/to/data.csv", metrics = "perRiffle")
+##   run_pipeline(input_path = "path/to/data.xlsx", metrics = "perRiffle")
 
 ## Source the pipeline orchestrator
 source("R/run_pipeline.R")
 
 ## User-configurable settings
-csv_path <- NULL  # Set this to your input CSV before running.
+input_path <- NULL  # Set this to your input .xlsx workbook before running.
 n_cores <- 1L  # Sequential execution (parallel overhead not worth it for dataset size)
 
-if (is.null(csv_path) || !nzchar(csv_path)) {
+if (is.null(input_path) || !nzchar(input_path)) {
   stop(
-    "Set `csv_path` in run_all.R to your input CSV before running the pipeline.",
+    "Set `input_path` in run_all.R to your input .xlsx workbook before running the pipeline.",
     call. = FALSE
   )
 }
 
 ## Execute full pipeline
 run_dir <- run_pipeline(
+  input_path = input_path,
   config_dir = "config",
   data_dir = "data",
-  csv_path = csv_path,
   output_dir = "outputs",
   metrics = NULL,
   seed = 42,

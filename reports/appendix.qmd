@@ -1,200 +1,171 @@
 ---
-title: "StreamCurves — Geomorphic Reference Curve Analysis"
-subtitle: "Technical Appendix"
+title: "StreamCurves - Current Session Appendix"
+subtitle: "Detailed Reference Curve Backup"
 format:
   pdf:
     documentclass: article
     papersize: letter
     geometry:
-      - margin=1in
+      - margin=0.85in
     toc: true
-    toc-depth: 3
+    toc-depth: 2
     number-sections: true
     keep-tex: false
-    fig-width: 7
-    fig-height: 5
 params:
-  run_dir: "../outputs/run_latest"
+  session_dir: null
 ---
 
 ```{r setup, include=FALSE}
-library(tidyverse)
-library(gt)
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
-                      fig.align = "center")
+library(dplyr)
+library(tibble)
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "90%"
+)
 
-run_dir <- params$run_dir
-if (!dir.exists(run_dir)) {
-  all_runs <- list.dirs("../outputs", recursive = FALSE, full.names = TRUE)
-  all_runs <- sort(all_runs, decreasing = TRUE)
-  if (length(all_runs) > 0) run_dir <- all_runs[1]
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
 }
 
-tables_dir <- file.path(run_dir, "tables")
-plots_dir  <- file.path(run_dir, "plots")
-
-safe_read <- function(path) {
-  if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE)
-  else tibble::tibble()
+if (is.null(params$session_dir) || !dir.exists(params$session_dir)) {
+  stop("A valid session_dir parameter is required.")
 }
+
+session_dir <- normalizePath(params$session_dir, winslash = "/", mustWork = TRUE)
+context_path <- file.path(session_dir, "report_context.rds")
+if (!file.exists(context_path)) {
+  stop("report_context.rds was not found in session_dir.")
+}
+
+ctx <- readRDS(context_path)
+session_meta <- ctx$session_meta %||% list()
+phase2_summary <- tibble::as_tibble(ctx$phase2_summary %||% tibble())
+regional_curves <- tibble::as_tibble(ctx$regional_curves %||% tibble())
+decision_history <- tibble::as_tibble(ctx$decision_history %||% tibble())
+appendix_metrics <- ctx$metrics %||% list()
 ```
 
-# Introduction
+# Session Summary
 
-This appendix provides the complete technical analysis for all StreamCurves geomorphic reference-curve metrics. Each metric section includes data quality checks, stratification screening, model selection, diagnostics, and reference curve development.
+- Generated: `r session_meta$generated_at %||% "Unknown"`
+- Summary metrics: `r session_meta$metric_count %||% 0`
+- Curves ready: `r session_meta$complete_metrics %||% 0`
+- Pending metrics: `r session_meta$pending_metrics %||% 0`
+- Metrics needing review: `r session_meta$review_metrics %||% 0`
 
-# Data Quality
+# Completed Metrics
 
-## Metric Precheck
+```{r completed-metrics, results='asis'}
+completed_metrics <- Filter(function(item) {
+  (item$curve_count %||% 0) > 0
+}, appendix_metrics)
 
-```{r precheck}
-precheck <- safe_read(file.path(tables_dir, "metric_precheck.csv"))
-if (nrow(precheck) > 0) {
-  gt::gt(precheck |> select(metric, display_name, n_obs, n_missing, min, median, max, sd, precheck_status)) |>
-    gt::fmt_number(columns = c(min, median, max, sd), decimals = 2) |>
-    gt::tab_header(title = "Metric Data Quality Summary")
-}
-```
+if (length(completed_metrics) == 0) {
+  cat("No completed summary metrics are available in the current session.")
+} else {
+  for (item in completed_metrics) {
+    cat("\n\n## ", item$display_name %||% item$metric, "\n\n", sep = "")
+    cat("**Metric key:** `", item$metric, "`  \n", sep = "")
+    cat("**Family:** ", item$family %||% "N/A", "  \n", sep = "")
+    cat("**Units:** ", item$units %||% "N/A", "  \n", sep = "")
+    cat("**Direction:** ", item$direction %||% "Unknown", "  \n", sep = "")
+    cat("**Observations:** ", item$n_obs %||% "N/A", "  \n", sep = "")
+    cat("**Status:** ", item$status_label %||% "Unknown", "  \n", sep = "")
+    cat("**Selected stratification:** ", item$selected_curve_stratification_label %||% "None", "  \n", sep = "")
+    cat("**Recommended stratification:** ", item$recommended_curve_stratification_label %||% "None", "  \n", sep = "")
+    cat("**Curve summary:** ", item$curve_summary %||% "Not available", "  \n", sep = "")
 
-# Stratification Analysis
-
-## Screening Results
-
-```{r strat-screening}
-strat_results <- safe_read(file.path(tables_dir, "stratification_screening.csv"))
-if (nrow(strat_results) > 0) {
-  gt::gt(strat_results |>
-    select(metric, stratification, test, statistic, p_value, n_groups, min_group_n, classification) |>
-    mutate(p_value = round(p_value, 4), statistic = round(statistic, 2))
-  ) |>
-    gt::tab_header(title = "Stratification Screening Results")
-}
-```
-
-## Decisions
-
-```{r strat-decisions}
-strat_dec <- safe_read(file.path(tables_dir, "stratification_decisions.csv"))
-if (nrow(strat_dec) > 0) {
-  gt::gt(strat_dec) |>
-    gt::fmt_number(columns = where(is.numeric), decimals = 4) |>
-    gt::tab_header(title = "Stratification Decisions")
-}
-```
-
-# Per-Metric Analysis
-
-```{r per-metric, results='asis', fig.width=7, fig.height=5}
-model_sel <- safe_read(file.path(tables_dir, "model_selections.csv"))
-model_cands <- safe_read(file.path(tables_dir, "model_candidates.csv"))
-diag_summary <- safe_read(file.path(tables_dir, "diagnostic_summary.csv"))
-ref_curves <- safe_read(file.path(tables_dir, "reference_curves.csv"))
-
-if (nrow(model_sel) > 0) {
-  for (i in seq_len(nrow(model_sel))) {
-    mk <- model_sel$metric[i]
-    cat("\n\n## ", mk, "\n\n")
-
-    # Model selection
-    sel <- model_sel |> filter(metric == mk)
-    cat("**Selected model:** ", sel$predictors, "\n\n")
-    cat("**Adj R²:** ", round(sel$adj_r2, 3), " | **BIC:** ", round(sel$bic, 1),
-        " | **Top models:** ", sel$n_top_models, "\n\n")
-
-    # Diagnostics
-    diag <- diag_summary |> filter(metric == mk)
-    if (nrow(diag) > 0) {
-      cat("**Diagnostics:** ", diag$overall_status,
-          " (Shapiro p=", round(diag$shapiro_p, 4),
-          ", BP p=", round(diag$bp_p, 4),
-          ", Max VIF=", round(diag$max_vif, 2), ")\n\n")
+    if (!is.na(item$manual_curve_label %||% NA_character_)) {
+      cat("**Manual curve:** ", item$manual_curve_label, "  \n", sep = "")
+    }
+    if (!is.na(item$warning_summary %||% NA_character_)) {
+      cat("**Warnings:** ", item$warning_summary, "\n\n", sep = "")
+    } else {
+      cat("\n")
     }
 
-    # Reference curve
-    rc <- ref_curves |> filter(metric == mk)
-    if (nrow(rc) > 0) {
-      cat("**Reference IQR:** [", round(rc$q25, 1), ", ", round(rc$q75, 1), "]\n\n")
+    if (is.data.frame(item$threshold_table) && nrow(item$threshold_table) > 0) {
+      cat("\n### Threshold Table\n\n")
+      print(knitr::kable(item$threshold_table, format = "latex", booktabs = TRUE, longtable = FALSE))
+      cat("\n")
     }
 
-    # Include diagnostic plot if exists
-    diag_plot <- file.path(plots_dir, paste0(mk, "_diagnostic_4panel.png"))
-    if (file.exists(diag_plot)) {
-      cat("![", mk, " Diagnostics](", diag_plot, ")\n\n")
+    if (is.data.frame(item$stats_table) && nrow(item$stats_table) > 0) {
+      cat("\n### Reference Statistics\n\n")
+      print(knitr::kable(item$stats_table, format = "latex", booktabs = TRUE, longtable = FALSE))
+      cat("\n")
     }
 
-    # Include reference bar chart if exists
-    bar_plot <- file.path(plots_dir, paste0(mk, "_reference_bar_chart.png"))
-    if (file.exists(bar_plot)) {
-      cat("![", mk, " Reference Bar Chart](", bar_plot, ")\n\n")
+    plot_file <- item$plot_file %||% NA_character_
+    plot_path <- if (!is.na(plot_file) && nzchar(plot_file)) {
+      if (grepl("^[A-Za-z]:|^/", plot_file)) {
+        plot_file
+      } else {
+        file.path(session_dir, plot_file)
+      }
+    } else {
+      NA_character_
+    }
+    if (!is.na(plot_path) && nzchar(plot_path) && file.exists(plot_path)) {
+      cat("\n### Curve Plot\n\n")
+      knitr::include_graphics(plot_path)
+      cat("\n")
     }
 
-    # Include reference curve plot if exists
-    ref_plot <- file.path(plots_dir, paste0(mk, "_reference_curve.png"))
-    if (file.exists(ref_plot)) {
-      cat("![", mk, " Reference Curve](", ref_plot, ")\n\n")
-    }
-
-    cat("\\newpage\n\n")
+    cat("\n\\newpage\n")
   }
 }
 ```
 
-# Cross-Metric Analysis
+# Incomplete Metrics
 
-## Correlation Analysis
+```{r incomplete-metrics}
+incomplete_tbl <- purrr::map_dfr(appendix_metrics, function(item) {
+  tibble(
+    Metric = item$display_name %||% item$metric,
+    Status = item$status_label %||% "Unknown",
+    `Selected Stratification` = item$selected_curve_stratification_label %||% "None",
+    Warnings = item$warning_summary %||% NA_character_
+  )
+}) |>
+  filter(Status == "Incomplete")
 
-```{r cross-metric}
-redundancy <- safe_read(file.path(tables_dir, "metric_redundancy_results.csv"))
-if (nrow(redundancy) > 0) {
-  gt::gt(redundancy |>
-    filter(abs_pearson > 0.5) |>
-    arrange(desc(abs_pearson)) |>
-    select(display_1, display_2, pearson_r, spearman_rho, redundant_flag)
-  ) |>
-    gt::fmt_number(columns = c(pearson_r, spearman_rho), decimals = 3) |>
-    gt::tab_header(title = "Metric Pairs with |r| > 0.50")
+if (nrow(incomplete_tbl) == 0) {
+  cat("No incomplete metrics remain in the current session.")
+} else {
+  knitr::kable(incomplete_tbl, format = "latex", booktabs = TRUE)
 }
+```
 
-# Include correlation heatmap
-heatmap_path <- file.path(plots_dir, "correlation_heatmap.png")
-if (file.exists(heatmap_path)) {
-  knitr::include_graphics(heatmap_path)
+# Phase 2 Summary
+
+```{r phase2}
+if (nrow(phase2_summary) == 0) {
+  cat("No current Phase 2 summary is available.")
+} else {
+  knitr::kable(phase2_summary, format = "latex", booktabs = TRUE, longtable = TRUE)
 }
 ```
 
 # Regional Curves
 
 ```{r regional}
-regional <- safe_read(file.path(tables_dir, "regional_curves_results.csv"))
-if (nrow(regional) > 0) {
-  gt::gt(regional |>
-    select(response, predictor, group_var, group_level, n_obs,
-           coefficient_a, exponent_b, r_squared, fit_status)
-  ) |>
-    gt::fmt_number(columns = c(coefficient_a, exponent_b, r_squared), decimals = 3) |>
-    gt::tab_header(title = "Regional Hydraulic Geometry Curves")
+if (nrow(regional_curves) == 0) {
+  cat("No regional curve outputs are available.")
+} else {
+  knitr::kable(regional_curves, format = "latex", booktabs = TRUE, longtable = TRUE)
 }
 ```
 
-# QA Summary
+# Decision History
 
-```{r qa}
-qa_log <- safe_read(file.path(run_dir, "logs", "qa_log.csv"))
-if (nrow(qa_log) > 0) {
-  gt::gt(qa_log) |> gt::tab_header(title = "QA Log")
-}
-
-pipeline_log <- safe_read(file.path(run_dir, "logs", "pipeline_log.csv"))
-if (nrow(pipeline_log) > 0) {
-  gt::gt(pipeline_log) |> gt::tab_header(title = "Pipeline Execution Log")
-}
-```
-
-# Session Information
-
-```{r session-info}
-session_path <- file.path(run_dir, "manifest", "session_info.txt")
-if (file.exists(session_path)) {
-  cat(readLines(session_path), sep = "\n")
+```{r history}
+if (nrow(decision_history) == 0) {
+  cat("No decision history entries are available.")
+} else {
+  knitr::kable(decision_history, format = "latex", booktabs = TRUE, longtable = TRUE)
 }
 ```

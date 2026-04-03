@@ -47,30 +47,30 @@ per_metric_outputs:
       - "{metric}_model_object.rds"
 
 summary_outputs:
-  cross_metric:
+  thresholds:
     enabled: true
     files:
-      - metric_correlation_matrix.csv
-      - metric_redundancy_results.csv
-    plots:
-      - correlation_heatmap.png
-      - pca_biplot.png
+      - reference_curve_thresholds.csv
+  metric_status:
+    enabled: true
+    files:
+      - metric_status.csv
+  stratification_decisions:
+    enabled: true
+    files:
+      - stratification_decisions.csv
+  decision_history:
+    enabled: true
+    files:
+      - decision_history.csv
   regional_curves:
     enabled: true
     files:
-      - regional_curves_results.csv
-    plots:
-      - regional_curve_{response}_{strat}.png
-  manifest:
+      - regional_curves.csv
+  results_bundle:
     enabled: true
     files:
-      - run_manifest.json
-      - session_info.txt
-      - qa_summary.csv
-  pipeline_log:
-    enabled: true
-    files:
-      - pipeline_log.csv
+      - results_bundle.zip
 
 report_products:
   dashboard:
@@ -78,18 +78,13 @@ report_products:
     file: "reports/dashboard.qmd"
     format: html
     tier: 1
-  poster:
-    enabled: true
-    file: "reports/poster.qmd"
-    format: pdf
-    tier: 2
   summary:
     enabled: true
     file: "reports/summary.qmd"
     format: pdf
-    tier: 3
+    tier: 2
   appendix:
     enabled: true
     file: "reports/appendix.qmd"
     format: pdf
-    tier: 4
+    tier: 3

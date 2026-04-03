@@ -81,23 +81,17 @@ mod_regional_curve_server <- function(id, rv) {
 
     ## ── Dynamic exploration strat picker ─────────────────────────────────────
     output$exploration_strat_picker_ui <- renderUI({
-      ## Build choices from rv$strat_config (single-type only, column must exist)
       base_choices <- character(0)
+      cg_choices <- character(0)
       for (sk in names(rv$strat_config)) {
         sc <- rv$strat_config[[sk]]
-        if (isTRUE(sc$is_custom_grouping)) next
         if (is.null(sc$type) || sc$type != "single") next
         if (is.null(sc$column_name) || !sc$column_name %in% names(rv$data)) next
-        base_choices <- c(base_choices, setNames(sk, sc$display_name %||% sk))
-      }
-
-      ## Custom groupings as separate group
-      cg_choices <- character(0)
-      for (cg_key in names(rv$custom_groupings)) {
-        sc <- rv$strat_config[[cg_key]]
-        if (is.null(sc) || is.null(sc$column_name)) next
-        if (!sc$column_name %in% names(rv$data)) next
-        cg_choices <- c(cg_choices, setNames(cg_key, sc$display_name %||% cg_key))
+        if (isTRUE(sc$is_custom_grouping)) {
+          cg_choices <- c(cg_choices, setNames(sk, sc$display_name %||% sk))
+        } else {
+          base_choices <- c(base_choices, setNames(sk, sc$display_name %||% sk))
+        }
       }
 
       if (length(cg_choices) > 0) {
@@ -126,24 +120,20 @@ mod_regional_curve_server <- function(id, rv) {
 
     ## ── Dynamic stratify dropdown ───────────────────────────────────────────
     output$stratify_ui <- renderUI({
-      ## Build from rv$strat_config (single-type, column exists)
       base_choices <- c("None" = "none")
+      custom_choices <- character(0)
       for (sk in names(rv$strat_config)) {
         sc <- rv$strat_config[[sk]]
-        if (isTRUE(sc$is_custom_grouping)) next
         if (is.null(sc$type) || sc$type != "single") next
         if (is.null(sc$column_name) || !sc$column_name %in% names(rv$data)) next
-        base_choices <- c(base_choices, setNames(sk, sc$display_name %||% sk))
+        if (isTRUE(sc$is_custom_grouping)) {
+          custom_choices <- c(custom_choices, setNames(sk, sc$display_name %||% sk))
+        } else {
+          base_choices <- c(base_choices, setNames(sk, sc$display_name %||% sk))
+        }
       }
 
-      ## Append custom groupings
-      cg <- rv$custom_groupings
-      if (length(cg) > 0) {
-        custom_choices <- character(0)
-        for (k in names(cg)) {
-          custom_choices <- c(custom_choices,
-                              setNames(k, cg[[k]]$display_name %||% k))
-        }
+      if (length(custom_choices) > 0) {
         choices <- list("Base" = base_choices, "Custom Groupings" = custom_choices)
       } else {
         choices <- base_choices

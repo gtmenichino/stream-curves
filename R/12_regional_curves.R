@@ -97,7 +97,7 @@ fit_regional_curve <- function(data, response_var, predictor_var,
           y = paste0(response_var, " (log scale)"),
           color = group_var
         ) +
-        ggplot2::theme_minimal()
+        streamcurves_minimal_plot_theme()
     }, error = function(e) NULL)
 
     return(list(model_summary = model_rows, plot = p))
@@ -201,7 +201,7 @@ fit_regional_curve <- function(data, response_var, predictor_var,
       x = paste0(predictor_var, " (log scale)"),
       y = paste0(response_var, " (log scale)")
     ) +
-    ggplot2::theme_minimal()
+    streamcurves_minimal_plot_theme()
 
   list(model_summary = model_row, plot = p)
 }
@@ -274,7 +274,7 @@ build_regional_boxplot <- function(data, response_col, response_label,
         x = strat_label,
         y = response_label
       ) +
-      ggplot2::theme(legend.position = "none")
+      streamcurves_plot_text_theme(legend_position = "none")
   }, error = function(e) {
     cli::cli_alert_warning("Regional boxplot failed for {response_col} x {strat_col}: {e$message}")
     NULL

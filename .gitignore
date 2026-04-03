@@ -32,8 +32,8 @@ reports/*.pdf
 /docs/OSAM_*.pdf
 
 # Local sensitive inputs
-/.local/test_workbook.xlsx
-/path/to/source.csv
+/OSAM_summarydata.xlsx
+/OSAM_summarydata.csv
 
 # Local planning / assistant files
 .claude/

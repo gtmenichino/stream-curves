@@ -1,5 +1,9 @@
 suppressPackageStartupMessages({})
 
+project_root <- normalizePath(".", winslash = "/")
+
+source("tests/local_workbook_helper.R", local = TRUE)
+
 if (!requireNamespace("shinytest2", quietly = TRUE)) {
   cat("phase1_scatter_browser_stability_check: SKIPPED (shinytest2 not installed)\n")
   quit(save = "no", status = 0L)
@@ -21,7 +25,7 @@ if (is.na(chrome_path) || !nzchar(chrome_path)) {
 Sys.setenv(NOT_CRAN = "true", CHROMOTE_CHROME = chrome_path)
 
 app_dir <- normalizePath("app", winslash = "/", mustWork = TRUE)
-workbook_path <- normalizePath(".local/test_workbook.xlsx", winslash = "/", mustWork = TRUE)
+workbook_path <- require_streamcurves_test_workbook("phase1_scatter_browser_stability_check", project_root = project_root)
 
 app <- shinytest2::AppDriver$new(
   app_dir = app_dir,

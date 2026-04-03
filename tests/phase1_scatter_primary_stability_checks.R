@@ -7,9 +7,13 @@ old_wd <- getwd()
 on.exit(setwd(old_wd), add = TRUE)
 setwd("app")
 source("app.R", local = TRUE)
+source("../tests/local_workbook_helper.R", local = TRUE)
+
+project_root <- streamcurves_test_root()
+workbook_path <- require_streamcurves_test_workbook("phase1_scatter_primary_stability_checks", project_root = project_root)
 
 build_phase1_test_rv <- function() {
-  input_bundle <- read_input_workbook("../.local/test_workbook.xlsx")
+  input_bundle <- read_input_workbook(workbook_path)
 
   clean_result <- clean_data(
     input_bundle$raw_data,

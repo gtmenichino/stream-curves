@@ -6,10 +6,13 @@ suppressPackageStartupMessages({
 project_root <- normalizePath(".", winslash = "/")
 connect_cloud_runtime <- FALSE
 
+source("tests/local_workbook_helper.R", local = TRUE)
 source("R/00_input_workbook.R", local = TRUE)
 source("app/helpers/notifications.R", local = TRUE)
 source("app/helpers/phase_tracker.R", local = TRUE)
 source("app/modules/mod_data_overview.R", local = TRUE)
+
+workbook_path <- require_streamcurves_test_workbook("workbook_editor_checks", project_root = project_root)
 
 normalize_link_table <- function(df, key_col, value_col) {
   if (nrow(df) == 0) {
@@ -23,7 +26,7 @@ normalize_link_table <- function(df, key_col, value_col) {
 }
 
 check_metrics_editor_round_trip <- function() {
-  input_bundle <- read_input_workbook(".local/test_workbook.xlsx")
+  input_bundle <- read_input_workbook(workbook_path)
   editor_df <- build_metrics_editor_df(input_bundle$metadata)
 
   stopifnot(all(c("allowed_predictors", "allowed_stratifications") %in% names(editor_df)))
@@ -45,7 +48,7 @@ check_metrics_editor_round_trip <- function() {
 }
 
 check_workbook_export_round_trip <- function() {
-  input_bundle <- read_input_workbook(".local/test_workbook.xlsx")
+  input_bundle <- read_input_workbook(workbook_path)
   out_path <- tempfile("streamcurves_editor_", fileext = ".xlsx")
   on.exit(unlink(out_path, force = TRUE), add = TRUE)
 
@@ -67,7 +70,7 @@ check_workbook_export_round_trip <- function() {
 }
 
 check_site_mask_editor_round_trip <- function() {
-  input_bundle <- read_input_workbook(".local/test_workbook.xlsx")
+  input_bundle <- read_input_workbook(workbook_path)
   updated_tables <- apply_site_mask_selection_to_tables(
     input_bundle$metadata,
     c(2L, 5L, 9L),

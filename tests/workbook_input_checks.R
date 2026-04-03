@@ -2,13 +2,18 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
+project_root <- normalizePath(".", winslash = "/")
+
+source("tests/local_workbook_helper.R", local = TRUE)
 source("R/00_input_workbook.R", local = TRUE)
 source("R/02_clean_data.R", local = TRUE)
 source("R/03_derive_variables.R", local = TRUE)
 source("R/04_metric_precheck.R", local = TRUE)
 
+workbook_path <- require_streamcurves_test_workbook("workbook_input_checks", project_root = project_root)
+
 check_bundled_workbook <- function() {
-  input_bundle <- read_input_workbook(".local/test_workbook.xlsx")
+  input_bundle <- read_input_workbook(workbook_path)
 
   stopifnot(length(input_bundle$metric_config) == 22L)
   stopifnot(length(input_bundle$strat_config) == 11L)

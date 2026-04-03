@@ -6,9 +6,9 @@ The repository includes:
 
 - A Shiny app for interactive data loading, reference-curve analysis, and regional-curve analysis
 - A scripted pipeline for running the same analysis from the command line
-- An input workbook that defines raw data, metrics, predictors, stratifications, and factor recodes
+- A workbook format that defines raw data, metrics, predictors, stratifications, and factor recodes
 - A runtime output registry in `config/output_registry.yaml`
-- Report templates, archive material, and reference documents
+- Report templates and reference documents
 
 ## Requirements
 
@@ -113,7 +113,6 @@ stream-curves/
 |- reports/      Quarto report templates
 |- scripts/      Project utility scripts, including manifest generation
 |- docs/         Reference material retained with the project
-|- archive/      Historical prototypes and legacy reference files
 |- outputs/      Run outputs and saved sessions (ignored)
 |- run_all.R     Pipeline entrypoint
 `- .Rprofile     Project options and reproducibility seed
@@ -137,8 +136,6 @@ Optional site-mask sheets:
 - `site_masks`
 - `site_mask_settings`
 
-The bundled example workbook is `.local/test_workbook.xlsx`.
-
 Continuous custom stratifications are defined in `strat_groups.rule_expression` with comparisons joined by `&`. Supported operators are `<`, `<=`, `>`, and `>=`.
 
 Examples:
@@ -153,11 +150,6 @@ Use `stratifications.strat_type = custom_group` with:
 
 - `source_data_type = categorical` and `strat_groups.source_values` for categorical regrouping
 - `source_data_type = continuous` and `strat_groups.rule_expression` for numeric binning
-
-The local workbook includes both patterns:
-
-- `Ecoregion_grouped`: `ECBP|HELP` vs `IP`
-- `Slope_per_grouped`: `<= 1` vs `> 1`
 
 Derived predictors are defined in the `predictors` sheet. Factor recodes are defined in the `factor_recodes` sheet and can also be referenced as stratifications.
 
@@ -175,13 +167,16 @@ The only remaining runtime config file outside the workbook is `config/output_re
 
 - The app accepts `.xlsx` workbooks only.
 - The scripted pipeline accepts `.xlsx` workbooks via the required `input_path` argument.
+- The repository does not ship a workbook with data. Keep local workbooks untracked.
 - Character fields are trimmed during import, and derived variables are computed when required source columns are available.
 
-To regenerate the bundled workbook from the legacy CSV and YAML registries:
+To generate a workbook from a source CSV and the YAML registries:
 
 ```bash
-python scripts/migrate_registry_to_workbook.py
+python scripts/migrate_registry_to_workbook.py --csv path/to/source.csv --output path/to/workbook.xlsx
 ```
+
+For workbook-dependent tests, either set `STREAMCURVES_TEST_WORKBOOK` to a local `.xlsx` path or place a local workbook at `.local/test_workbook.xlsx`.
 
 ## Reports
 
@@ -190,10 +185,10 @@ The `reports/` directory contains Quarto templates for dashboard, summary, poste
 ## Included Reference Material
 
 - `docs/` contains supporting reference documents used during development
-- `archive/` contains historical prototypes and legacy files that are kept for context, not active runtime use
 
 ## Version Control Notes
 
 - Generated outputs are ignored.
+- Local workbooks and other sensitive inputs are ignored.
 - Local R session files are ignored.
 - Local assistant and planning artifacts are ignored.

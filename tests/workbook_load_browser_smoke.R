@@ -1,5 +1,9 @@
 suppressPackageStartupMessages({})
 
+project_root <- normalizePath(".", winslash = "/")
+
+source("tests/local_workbook_helper.R", local = TRUE)
+
 if (!requireNamespace("shinytest2", quietly = TRUE)) {
   cat("workbook_load_browser_smoke: SKIPPED (shinytest2 not installed)\n")
   quit(save = "no", status = 0L)
@@ -88,7 +92,7 @@ chromote::set_default_chromote_object(
 )
 
 app_dir <- normalizePath("app", winslash = "/", mustWork = TRUE)
-workbook_path <- normalizePath(".local/test_workbook.xlsx", winslash = "/", mustWork = TRUE)
+workbook_path <- require_streamcurves_test_workbook("workbook_load_browser_smoke", project_root = project_root)
 
 app <- shinytest2::AppDriver$new(
   app_dir = app_dir,

@@ -5,10 +5,13 @@ suppressPackageStartupMessages({
 project_root <- normalizePath(".", winslash = "/")
 connect_cloud_runtime <- FALSE
 
+source("tests/local_workbook_helper.R", local = TRUE)
 source("R/00_input_workbook.R", local = TRUE)
 source("app/helpers/notifications.R", local = TRUE)
 source("app/helpers/phase_tracker.R", local = TRUE)
 source("app/modules/mod_data_overview.R", local = TRUE)
+
+workbook_path <- require_streamcurves_test_workbook("metadata_editor_ui_checks", project_root = project_root)
 
 check_metric_dropdown_specs <- function(tables) {
   metrics_df <- editor_df_for_tab(tables, "metrics")
@@ -165,7 +168,7 @@ check_picker_commit_and_layout_wiring <- function() {
   stopifnot(!grepl("min-height: 38rem;", css_text, fixed = TRUE))
 }
 
-input_bundle <- read_input_workbook(".local/test_workbook.xlsx")
+input_bundle <- read_input_workbook(workbook_path)
 tables <- input_bundle$metadata
 
 check_metric_dropdown_specs(tables)

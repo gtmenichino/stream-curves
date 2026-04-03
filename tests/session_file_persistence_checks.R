@@ -6,6 +6,7 @@ suppressPackageStartupMessages({
 project_root <- normalizePath(".", winslash = "/")
 connect_cloud_runtime <- FALSE
 
+source("tests/local_workbook_helper.R", local = TRUE)
 source("R/00_input_workbook.R", local = TRUE)
 source("R/02_clean_data.R", local = TRUE)
 source("R/03_derive_variables.R", local = TRUE)
@@ -15,8 +16,11 @@ source("app/helpers/phase_tracker.R", local = TRUE)
 source("app/helpers/summary_page.R", local = TRUE)
 source("app/modules/mod_data_overview.R", local = TRUE)
 
+workbook_path <- require_streamcurves_test_workbook("session_file_persistence_checks", project_root = project_root)
+workbook_name <- basename(workbook_path)
+
 make_session_rv <- function() {
-  input_bundle <- read_input_workbook(".local/test_workbook.xlsx")
+  input_bundle <- read_input_workbook(workbook_path)
   clean_result <- clean_data(
     input_bundle$raw_data,
     input_bundle$metric_config,
@@ -38,7 +42,7 @@ make_session_rv <- function() {
     precheck_df = precheck,
     data_source = "upload",
     data_fingerprint = digest::digest(derived, algo = "md5"),
-    upload_filename = ".local/test_workbook.xlsx",
+    upload_filename = workbook_name,
     session_name = NULL,
     input_metadata = input_bundle$metadata,
     site_mask_config = input_bundle$site_mask_config,
@@ -217,7 +221,7 @@ check_session_upload_restores_data_overview_state <- function() {
         as.integer(rv$metric_phase_cache$perRiffle$phase1_quick_mask_site_ids),
         c(2L, 4L)
       ))
-      stopifnot(identical(rv$upload_filename, ".local/test_workbook.xlsx"))
+      stopifnot(identical(rv$upload_filename, workbook_name))
     }
   )
 }

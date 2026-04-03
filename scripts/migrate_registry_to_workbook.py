@@ -177,7 +177,7 @@ def normalize_ecoregion_metadata(stratifications_df: pd.DataFrame, data_df: pd.D
     levels = sorted(data_df["Ecoregion"].dropna().astype(str).str.strip().unique().tolist())
     stratifications_df.loc[mask, "levels"] = pipe_join(levels)
     stratifications_df.loc[mask, "pairwise_comparisons"] = pairwise_join(auto_pairwise(levels))
-    stratifications_df.loc[mask, "notes"] = "Raw ecoregion values from source data"
+    stratifications_df.loc[mask, "notes"] = "Raw ecoregion values from the source data"
     return stratifications_df
 
 
@@ -422,12 +422,12 @@ def migrate_to_workbook(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert the source CSV + YAML registries into a workbook input."
+        description="Convert a source CSV plus the YAML registries into a workbook input."
     )
     parser.add_argument(
         "--csv",
         dest="csv_path",
-        default=str(ROOT / "path/to/source.csv"),
+        required=True,
         help="Path to the legacy source CSV.",
     )
     parser.add_argument(
@@ -457,7 +457,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         dest="output_path",
-        default=str(ROOT / ".local/test_workbook.xlsx"),
+        required=True,
         help="Path for the generated workbook.",
     )
     return parser.parse_args()
